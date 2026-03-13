@@ -1,12 +1,13 @@
-"""Pattern-based input sanitization — detects known attack patterns.
+"""Blink Sanitizer — Prompt Injection Detection
 
-Fast (~0ms), no LLM calls. Used in gateway middleware for first-line defense.
-Patterns cover OWASP LLM Top 10 categories.
+Pattern-based input sanitization — detects known attack patterns.
+Fast (~0ms), no LLM calls. Patterns cover OWASP LLM Top 10 categories.
 
-Anti-evasion pipeline:
+Features:
 - Unicode NFKD normalization (homoglyphs, fullwidth, zero-width chars, bidi)
-- Leetspeak de-substitution (1→i/l, 3→e, 4→a, etc.)
+- Leetspeak de-substitution (1->i/l, 3->e, 4->a, etc.)
 - Context field checking (indirect prompt injection defense)
+- 11 languages: EN, PT-BR, ES, FR, DE, IT, RU, ZH, JA, KO, AR
 """
 from __future__ import annotations
 
