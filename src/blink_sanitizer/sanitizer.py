@@ -2668,7 +2668,9 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # Plain "data" / "database" is moved around all day ("Export the data
         # to CSV", "Upload the data to Salesforce", "send data to stdin",
         # "send the data to me"), so it needs an attacker-side destination:
-        # "my server / webhook / bucket ...", an external or personal target,
+        # "my server / webhook / bucket ...", an external or personal target
+        # (the adjective must qualify a noun: "send data to remote." in a
+        # socket docstring is not an attack, "to a remote server" is),
         # "this URL/endpoint", a URL, e-mail address, domain or IP, or a
         # covert channel ("via webhook").
         re.compile(
@@ -2677,8 +2679,9 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"(?:data(?:base|set)?s?|records|tables?|(?:customer|user|contact)\s+lists?)\s+"
             r"(?:(?:from|in|of)\s+(?:the\s+|our\s+|your\s+)?[\w-]+(?:\s+[\w-]+)?\s+)?"
             r"(?:to\s+(?:my\s+(?:own\s+)?(?:server|endpoint|webhook|domain|bucket|host|vps|ip)\b"
-            r"|(?:an?\s+|the\s+|my\s+)?(?:external|remote|third[\s-]party|personal"
-            r"|private|outside|unknown|attacker'?s?|untrusted)\b|this\s+(?:url|address|endpoint"
+            r"|(?:an?\s+|the\s+|my\s+)?(?:(?:external|remote|third[\s-]party|personal"
+            r"|private|outside|unknown|untrusted)\s+[^\W\d_]|attacker'?s?\b)"
+            r"|this\s+(?:url|address|endpoint"
             r"|server|webhook|link|e-?mail|ip|domain)\b|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
             r"|(?:[\w-]+\.)+(?:com|net|org|io|ru|cn|xyz|info|biz|top|site|online|example|me|co"
             r"|cc|tk|su|onion)\b|\d{1,3}(?:\.\d{1,3}){3})"
