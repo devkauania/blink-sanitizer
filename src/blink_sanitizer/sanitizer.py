@@ -2628,10 +2628,34 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(export|send|transfer|upload|post|transmit|forward|exfiltrate|leak)\s+"
             r"(all\s+)?(the\s+)?(user\s+)?"
-            r"(data|database|credentials?|api\s+keys?|tokens?|secrets?|passwords?|"
+            r"(credentials?|api\s+keys?|tokens?|secrets?|passwords?|"
             r"environment\s+variables?|env\s+vars?)\s+"
             + _INTERNAL_TRANSFER
             + r"(to|from|via)\s+",
+            re.I,
+        ),
+        "data_exfiltration",
+    ),
+    (
+        # Plain "data" / "database" is moved around all day ("Export the data
+        # to CSV", "Upload the data to Salesforce", "send data to stdin",
+        # "send the data to me"), so it needs an attacker-side destination:
+        # "my server / webhook / bucket ...", an external or personal target,
+        # "this URL/endpoint", a URL, e-mail address, domain or IP, or a
+        # covert channel ("via webhook").
+        re.compile(
+            r"\b(?:export|send|transfer|upload|post|transmit|forward|exfiltrate|leak|copy)\s+"
+            r"(?:(?:all|the|of|our|your|user|customer|customers'?|company|internal)\s+){0,3}"
+            r"(?:data(?:base|set)?s?|records|tables?|(?:customer|user|contact)\s+lists?)\s+"
+            r"(?:(?:from|in|of)\s+(?:the\s+|our\s+|your\s+)?[\w-]+(?:\s+[\w-]+)?\s+)?"
+            r"(?:to\s+(?:my\s+(?:own\s+)?(?:server|endpoint|webhook|domain|bucket|host|vps|ip)\b"
+            r"|(?:an?\s+|the\s+|my\s+)?(?:external|remote|third[\s-]party|personal"
+            r"|private|outside|unknown|attacker'?s?|untrusted)\b|this\s+(?:url|address|endpoint"
+            r"|server|webhook|link|e-?mail|ip|domain)\b|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+            r"|(?:[\w-]+\.)+(?:com|net|org|io|ru|cn|xyz|info|biz|top|site|online|example|me|co"
+            r"|cc|tk|su|onion)\b|\d{1,3}(?:\.\d{1,3}){3})"
+            r"|via\s+(?:an?\s+)?(?:webhooks?|https?|curl|dns|ftp|e-?mail|pastebin|discord|telegram"
+            r"|external\s+\w+)\b)",
             re.I,
         ),
         "data_exfiltration",
