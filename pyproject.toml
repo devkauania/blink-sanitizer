@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "blink-sanitizer"
 version = "0.2.0"
-description = "Regex-based prompt injection detection for LLM applications — 259 patterns across 11 languages, zero dependencies"
+description = "Regex-based prompt injection detection for LLM applications — 262 patterns across 11 languages, zero dependencies"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
