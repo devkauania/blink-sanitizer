@@ -12,15 +12,23 @@ Features:
   non-ASCII sources only), NFKD, invisible / format / blank characters
 - Leetspeak de-substitution (1->i, 3->e, 4->a, etc.)
 - Separator stripping (i.g.n.o.r.e, i+g+n+o+r+e, i g n o r e), markdown
-  stripping (**ignore**), and chained leet+separator variants
+  stripping (**ignore**), chained leet+separator variants, and re-joining of
+  keywords split by spaces ("ign ore", "dis regard")
+- Bounded decoding of HTML entities, URL/percent encoding, backslash escapes,
+  hex and base64 blobs into extra candidates (depth 2, never longer than the
+  text they were decoded from)
 - Context field checking (indirect prompt injection defense)
 - 11 languages: EN, PT-BR, ES, FR, DE, IT, RU, ZH, JA, KO, AR
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import html
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from blink_sanitizer._confusables import CONFUSABLES_TO_ASCII
 
@@ -2520,6 +2528,22 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "prompt_injection",
     ),
     # ══════════════════════════════════════════════════════════
+    # ── UNIVERSAL: Chat-template role markers ────────────────
+    # ══════════════════════════════════════════════════════════
+    (
+        # Forged turn boundaries: chat-template special tokens anywhere, or a
+        # <system> tag that opens a line (as an injected turn would), e.g.
+        # decoded from "&lt;system&gt;". "Use <system> tags in prompts"
+        # mid-sentence is not flagged.
+        re.compile(
+            r"<\|\s*(?:im_start|im_end|system|endoftext|start_header_id|end_header_id|eot_id)"
+            r"\s*\|>"
+            r"|(?:^|\n)\s*<\s*/?\s*system\s*>",
+            re.I,
+        ),
+        "prompt_injection",
+    ),
+    # ══════════════════════════════════════════════════════════
     # ── UNIVERSAL: Data exfiltration ─────────────────────────
     # ══════════════════════════════════════════════════════════
     (
@@ -2698,6 +2722,96 @@ def _rejoin_split_words(text: str) -> str:
     return " ".join(out) if changed else text
 
 
+# ── Decoding encoded payloads into extra candidates ──────────
+#
+# HTML entities (&#105;gnore, &lt;system&gt;), URL/percent encoding
+# (%69gnore, form-encoded ignore+all+previous), backslash escapes
+# (\u0069gnore, \x69gnore), and hex / base64 blobs are decoded into one extra
+# view of the text, which is then scanned with the full pipeline. Every
+# decoder maps its escape to at most as many characters as the escape itself
+# (an entity, %XX or \xXX is >= 3 characters; base64 turns 4 into <= 3), so
+# a decoded view is never longer than its source: there is no
+# decompression-bomb style growth. Views are decoded at most
+# _MAX_DECODE_DEPTH times (double encoding such as &amp;#105; or base64 of a
+# URL-encoded string), and the decoded text goes through the same length
+# limits as any other input.
+
+_MAX_DECODE_DEPTH = 2
+_HTML_ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});?")
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+# A form-encoded run of 3+ words: "ignore+all+previous+instructions".
+_PLUS_JOINED = re.compile(r"[^\W_]+(?:\+[^\W_]+){2,}")
+_BACKSLASH_ESCAPE = re.compile(
+    r"\\(?:u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2}))"
+)
+# Hex blobs: 8+ bytes written as 16+ hex digits (byte-aligned).
+_HEX_RUN = re.compile(r"\b(?:[0-9a-fA-F]{2}){8,}\b")
+# Base64 (standard or URL-safe alphabet) runs of 16+ characters. Longer
+# runs than _BASE64_MAX_CHARS are not decoded (the default max_length keeps
+# every input below it anyway).
+_BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}|[A-Za-z0-9_-]{16,}={0,2}")
+_BASE64_MAX_CHARS = 65_536
+# A decoded blob is only used when it is UTF-8 text: at least this share of
+# its characters printable (or whitespace) and at least one letter.
+_MIN_PRINTABLE_RATIO = 0.9
+
+
+def _printable_text(raw: bytes) -> str | None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text or not any(ch.isalpha() for ch in text):
+        return None
+    printable = sum(1 for ch in text if ch.isprintable() or ch.isspace())
+    if printable < _MIN_PRINTABLE_RATIO * len(text):
+        return None
+    return text
+
+
+def _decode_base64_match(match: re.Match[str]) -> str:
+    blob = match.group(0)
+    if len(blob) > _BASE64_MAX_CHARS:
+        return blob
+    core = blob.rstrip("=").replace("-", "+").replace("_", "/")
+    if len(core) % 4 == 1:
+        return blob
+    try:
+        raw = base64.b64decode(core + "=" * (-len(core) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        return blob
+    text = _printable_text(raw)
+    return blob if text is None else text
+
+
+def _decode_hex_match(match: re.Match[str]) -> str:
+    text = _printable_text(bytes.fromhex(match.group(0)))
+    return match.group(0) if text is None else text
+
+
+def _decode_backslash_match(match: re.Match[str]) -> str:
+    digits = next(g for g in match.groups() if g is not None)
+    code_point = int(digits, 16)
+    if code_point > 0x10FFFF or 0xD800 <= code_point <= 0xDFFF:
+        return match.group(0)
+    return chr(code_point)
+
+
+def _decode_view(text: str) -> str:
+    """Return ``text`` with one layer of every supported encoding decoded."""
+    out = text
+    if "&" in out and _HTML_ENTITY.search(out):
+        out = html.unescape(out)
+    if "%" in out and _PERCENT_ESCAPE.search(out):
+        out = unquote(out, errors="replace")
+    if "+" in out:
+        out = _PLUS_JOINED.sub(lambda m: m.group(0).replace("+", " "), out)
+    if "\\" in out:
+        out = _BACKSLASH_ESCAPE.sub(_decode_backslash_match, out)
+    out = _HEX_RUN.sub(_decode_hex_match, out)
+    return _BASE64_RUN.sub(_decode_base64_match, out)
+
+
 DEFAULT_MAX_LENGTH = 20_000
 """Default per-field limit, in code points, for :class:`InputSanitizer`."""
 
@@ -2784,13 +2898,18 @@ class InputSanitizer:
            and hyphenated line breaks (ig-<newline>nore)
         8. "I"-as-"i" text — confusables whose prototype is "l" read as "i"
         9. Re-joined text — keywords split by spaces (ign ore, dis regard)
+        10. Decoded text — HTML entities, URL encoding, backslash escapes, hex
+            and base64 blobs decoded (up to two layers), each decoded view
+            scanned again with steps 1-9
         """
         # 0. Size limit on the raw text, before any work (fail closed).
         if self._too_long(text):
             if "input_too_long" not in violations:
                 violations.append("input_too_long")
             return
+        self._scan(text, violations, depth=0)
 
+    def _scan(self, text: str, violations: list[str], depth: int) -> None:
         # 1. Collapse whitespace runs so no pattern backtracks across them.
         original = _collapse_whitespace(text)
 
@@ -2848,3 +2967,10 @@ class InputSanitizer:
             for pattern, category in _PATTERNS:
                 if category not in violations and pattern.search(version):
                     violations.append(category)
+
+        # 10. Encoded payloads: one decoded view per layer, never longer than
+        #     its source, scanned with the same pipeline.
+        if depth < _MAX_DECODE_DEPTH:
+            decoded = _decode_view(original)
+            if decoded != original:
+                self._scan(decoded, violations, depth + 1)
