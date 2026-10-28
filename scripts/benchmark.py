@@ -13,8 +13,12 @@ Python version and platform the numbers were measured on. It then times
 single checks of large inputs, for benign prose and for adversarial payloads
 that trigger every normalization and decoding layer: 100,000 characters
 (~100 KB) with the default max_length (rejected before scanning), 20,000
-characters (the default max_length, fully scanned) and 100,000 characters
-with max_length=None (fully scanned).
+characters (the default max_length: scanned, or rejected as
+input_too_complex when it exceeds the scan-work budget), the same as both
+prompt and context, and 100,000 characters with max_length=None (fully
+scanned, no budget). Finally, for each payload it finds the largest size
+that is still scanned under the budget and times it as prompt + context:
+the slowest of those is the measured worst case at the default settings.
 """
 from __future__ import annotations
 
@@ -116,8 +120,14 @@ def large_inputs(size: int = LARGE_SIZE) -> dict[str, str]:
         "Lisu I (extra candidate)": f"{lisu_i} ",
         "Hangul (NFKD x3)": hangul,
         "mixed adversarial": mixed_unit,
+        # U+FDFA decomposes into 18 code points under NFKD.
+        "mixed + 12 x U+FDFA": mixed_unit + chr(0xFDFA) * 12,
     }
     return {name: (unit * (size // len(unit) + 1))[:size] for name, unit in payloads.items()}
+
+
+# max_length=None has no length or work bound; these are skipped in column C.
+_SKIP_UNLIMITED = {"mixed + 12 x U+FDFA"}
 
 
 def time_large() -> None:
@@ -125,25 +135,51 @@ def time_large() -> None:
     unlimited = InputSanitizer(max_length=None)
     at_limit = large_inputs(DEFAULT_MAX_LENGTH)
     print(f"single check, best of 3 (A = {LARGE_SIZE:,} chars, default limit -> rejected; "
-          f"B = {DEFAULT_MAX_LENGTH:,} chars, default limit -> scanned; "
-          f"C = {LARGE_SIZE:,} chars, max_length=None -> scanned):")
+          f"B = {DEFAULT_MAX_LENGTH:,} chars, default limit; "
+          f"B2 = the same text as prompt and context; "
+          f"C = {LARGE_SIZE:,} chars, max_length=None):")
     for name, text in large_inputs().items():
-        timings = [
-            min(_time_once(sanitizer, sample) for _ in range(3))
-            for sanitizer, sample in (
-                (default, text),
-                (default, at_limit[name]),
-                (unlimited, text),
-            )
-        ]
-        verdict = unlimited.check(text).violations
-        print(f"  {name:28s} A {timings[0] * 1000:6.2f} ms   B {timings[1] * 1000:7.1f} ms   "
-              f"C {timings[2] * 1000:8.1f} ms   {verdict}")
+        sample = at_limit[name]
+        t_a = min(_time_once(default, text) for _ in range(3))
+        t_b = min(_time_once(default, sample) for _ in range(3))
+        t_b2 = min(_time_once(default, sample, sample) for _ in range(3))
+        if name in _SKIP_UNLIMITED:
+            col_c = "       -"
+        else:
+            col_c = f"{min(_time_once(unlimited, text) for _ in range(3)) * 1000:8.1f}"
+        verdict = default.check(sample).violations
+        print(f"  {name:28s} A {t_a * 1000:6.2f} ms   B {t_b * 1000:7.1f} ms   "
+              f"B2 {t_b2 * 1000:7.1f} ms   C {col_c} ms   B verdict {verdict}")
+    time_budget_edge(default)
 
 
-def _time_once(sanitizer: InputSanitizer, text: str) -> float:
+def time_budget_edge(default: InputSanitizer) -> None:
+    """Slowest fully scanned input: for each payload, the largest size (up to
+    the default limit) that is still scanned instead of being rejected as
+    input_too_complex, checked as both prompt and context."""
+    print("largest size still scanned under the work budget (default limit), "
+          "prompt + context, best of 3:")
+    units = large_inputs(DEFAULT_MAX_LENGTH)
+    worst = 0.0
+    for name, full in units.items():
+        lo, hi = 0, DEFAULT_MAX_LENGTH
+        while lo < hi:  # largest prefix length that is not input_too_complex
+            mid = (lo + hi + 1) // 2
+            if "input_too_complex" in default.check(full[:mid]).violations:
+                hi = mid - 1
+            else:
+                lo = mid
+        sample = full[:lo]
+        elapsed = min(_time_once(default, sample, sample) for _ in range(3))
+        worst = max(worst, elapsed)
+        print(f"  {name:28s} {lo:6,} chars   {elapsed * 1000:7.1f} ms   "
+              f"{default.check(sample, context=sample).violations}")
+    print(f"  slowest: {worst * 1000:.1f} ms")
+
+
+def _time_once(sanitizer: InputSanitizer, text: str, context: str | None = None) -> float:
     t0 = time.perf_counter()
-    sanitizer.check(text)
+    sanitizer.check(text, context=context)
     return time.perf_counter() - t0
 
 
