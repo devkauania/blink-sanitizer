@@ -1,14 +1,15 @@
 """Blink Sanitizer — Prompt Injection Detection
 
 Pattern-based input sanitization — detects known attack patterns with
-compiled regexes, no LLM calls. Measured p50 ~0.35 ms / p95 ~0.70 ms per
-check on an Intel Core i5-12400F with CPython 3.12 (scripts/benchmark.py).
-This is a heuristic first layer, not a complete prompt-injection defense.
+compiled regexes, no LLM calls. See README "Performance" for latencies
+measured with scripts/benchmark.py. This is a heuristic first layer, not a
+complete prompt-injection defense.
 
 Features:
 - Per-field input size cap (fail closed) and whitespace-run collapsing
   (no regex can backtrack across long whitespace runs)
-- Unicode NFKD normalization (homoglyphs, fullwidth, Cf/invisible chars, bidi)
+- Unicode normalization: confusables (generated from Unicode confusables.txt,
+  non-ASCII sources only), NFKD, invisible / format / blank characters
 - Leetspeak de-substitution (1->i, 3->e, 4->a, etc.)
 - Separator stripping (i.g.n.o.r.e, i+g+n+o+r+e, i g n o r e), markdown
   stripping (**ignore**), and chained leet+separator variants
@@ -20,6 +21,8 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+
+from blink_sanitizer._confusables import CONFUSABLES_TO_ASCII
 
 
 @dataclass(frozen=True)
@@ -34,15 +37,21 @@ class SanitizationResult:
 #
 # After NFKD, a character counts as invisible when it is a Unicode format
 # character (category Cf: zero-width space/joiners, BOM, bidi controls, soft
-# hyphen, U+180E, the tag block U+E0000-U+E007F, ...) or one of the Hangul
-# fillers that render as blank space (U+3164 and U+FFA0 decompose to U+1160
-# under NFKD; U+115F is the choseong filler).
+# hyphen, U+180E, the tag block U+E0000-U+E007F, ...), a control character
+# that is not whitespace (category Cc: NUL, ESC, DEL, C1 controls), or one of
+# the characters that render as blank space without being Unicode whitespace:
+# the Hangul fillers (U+3164 and U+FFA0 decompose to U+1160 under NFKD;
+# U+115F is the choseong filler), U+2800 BRAILLE PATTERN BLANK and U+1D159
+# MUSICAL SYMBOL NULL NOTEHEAD. Combining marks (variation selectors, U+034F
+# COMBINING GRAPHEME JOINER, ...) are already dropped as category Mn.
 
-_INVISIBLE_EXTRA = frozenset("\u115F\u1160\u3164\uFFA0")
+_INVISIBLE_EXTRA = frozenset("\u115F\u1160\u3164\uFFA0\u2800\U0001D159")
 
 
 def _is_invisible(ch: str, category: str) -> bool:
-    return category == "Cf" or ch in _INVISIBLE_EXTRA
+    if category == "Cf" or ch in _INVISIBLE_EXTRA:
+        return True
+    return category == "Cc" and not ch.isspace()
 
 
 # ── Whitespace collapsing (ReDoS hardening) ──────────────────
@@ -66,12 +75,18 @@ def _collapse_whitespace(text: str) -> str:
     return _WHITESPACE_RUN.sub(_collapse_ws_run, text)
 
 
-# ── Homoglyphs → Latin (common lookalikes NFKD does not fold) ─
+# ── Homoglyphs → Latin (lookalikes NFKD does not fold) ─────
 #
 # Only non-ASCII source characters are mapped; ASCII is never rewritten, so
 # the leet layer and plain English are unaffected. Applied only to the
 # normalized candidates — the original text is still checked untouched, so
 # native Cyrillic/Greek/Armenian text keeps matching its own patterns.
+#
+# The full table is CONFUSABLES_TO_ASCII, generated from Unicode
+# confusables.txt by scripts/gen_confusables.py (_confusables.py records the
+# Unicode version and license). The hand-written map below predates it and
+# is applied on top, so its entries win where the two disagree (for example
+# confusables.txt maps Cyrillic "І" to "l"; this map keeps "I").
 
 _CONFUSABLES: dict[str, str] = {
     # Cyrillic lowercase -> Latin equivalent
@@ -175,7 +190,19 @@ _CONFUSABLES: dict[str, str] = {
     "\u0269": "i",  # ɩ
 }
 
-_CONFUSABLES_TABLE = str.maketrans(_CONFUSABLES)
+_CONFUSABLES_ALL: dict[str, str] = {**CONFUSABLES_TO_ASCII, **_CONFUSABLES}
+if any(ord(ch) < 0x80 for ch in _CONFUSABLES_ALL):  # pragma: no cover - data guard
+    raise RuntimeError("the confusables map must not rewrite ASCII characters")
+
+_CONFUSABLES_TABLE = str.maketrans(_CONFUSABLES_ALL)
+
+# UTS #39 gives "I"-like and "l"-like glyphs the same prototype, "l" (Lisu
+# letter I, Hebrew vav, ...), so "ꓲgnore" folds to "lgnore". When the text
+# contains one of them, a second normalized candidate maps them to "i".
+_L_PROTOTYPES = frozenset(ch for ch, target in _CONFUSABLES_ALL.items() if target == "l")
+_CONFUSABLES_TABLE_I = str.maketrans(
+    {**_CONFUSABLES_ALL, **{ch: "i" for ch in _L_PROTOTYPES}}
+)
 
 # ── Leetspeak mapping ────────────────────────────────────────
 
@@ -2542,23 +2569,27 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def _normalize_variants(text: str) -> tuple[str, str]:
+def _normalize_variants(
+    text: str, table: dict[int, str] = _CONFUSABLES_TABLE
+) -> tuple[str, str]:
     """Normalize text to defeat unicode evasion attacks.
 
-    1. Replace known confusable characters (Cyrillic/Greek/Armenian/small
-       capitals → Latin)
+    1. Replace confusable characters (non-ASCII lookalikes → ASCII, see
+       ``_CONFUSABLES_ALL``)
     2. NFKD normalization: maps fullwidth, compatibility chars to ASCII equivalents
     3. Remove combining marks (diacritics)
-    4. Remove invisible characters (category Cf + Hangul fillers)
-    5. Collapse whitespace runs again (NFKD and step 4 can create new ones)
+    4. Remove invisible characters (Cf, non-whitespace Cc, blank glyphs)
+    5. Replace confusables again (NFKD can expose new ones, e.g. a
+       mathematical alpha decomposes to Greek alpha)
+    6. Collapse whitespace runs again (NFKD and step 4 can create new ones)
 
     Returns two variants: one where invisible characters are deleted
     ("ig<ZWSP>nore" → "ignore") and one where they become a space
     ("ignore<ZWSP>all" → "ignore all"), so both uses of an invisible
     character — inside a word and as a word separator — are caught.
     """
-    text = text.translate(_CONFUSABLES_TABLE)
-    decomposed = unicodedata.normalize("NFKD", text)
+    text = text.translate(table)
+    decomposed = unicodedata.normalize("NFKD", text).translate(table)
     joined: list[str] = []
     spaced: list[str] = []
     has_invisible = False
@@ -2699,11 +2730,19 @@ class InputSanitizer:
         # 6. Markdown / hyphenated-line-break stripped variant.
         unmarked = _MARKDOWN_MARKS.sub("", _HYPHEN_BREAK.sub("", normalized))
 
+        # 7. "I"-like confusables read as "i" instead of their "l" prototype.
+        i_folded = (
+            normalized
+            if _L_PROTOTYPES.isdisjoint(original)
+            else _normalize_variants(original, _CONFUSABLES_TABLE_I)[0]
+        )
+
         # Check patterns against all versions (deduplicated)
         versions = [original]
         for v in (
             normalized,
             spaced,
+            i_folded,
             deleeted,
             stripped,
             stripped_deleeted,
