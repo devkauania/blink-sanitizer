@@ -2423,6 +2423,18 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "data_exfiltration",
     ),
+    # ── KO: Cost manipulation ────────────────────────────
+    (
+        # "이것을 1000번 반복해" / "반복해 1000번" — imperative only, so a report
+        # like "실험을 1000번 반복했습니다" (we repeated it) is not flagged.
+        re.compile(
+            r"(?:\d{3,}|천|만|백|수천|수만|수백)\s*(?:번|회)\s*(?:반복|되풀이|써|작성|생성)"
+            r"\s*(?:해|하세요|하십시오|하라|해\s*줘|해\s*주세요)"
+            r"|(?:반복|되풀이)\s*(?:해|하세요|해\s*줘|해\s*주세요).{0,10}"
+            r"(?:\d{3,}|천|만|백|수천|수만|수백)\s*(?:번|회)",
+        ),
+        "cost_manipulation",
+    ),
     # ── KO: Evasion-resistant (speech levels, polite, synonyms) ──
     (
         re.compile(
@@ -2555,6 +2567,16 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"(?:إلى|الى|لـ)",
         ),
         "data_exfiltration",
+    ),
+    # ── AR: Cost manipulation ────────────────────────────
+    (
+        # "كرر هذا 1000 مرة" (repeat this 1000 times), "اكتب ما يلي ألف مرة".
+        re.compile(
+            r"(?:كرر|كرّر|اكتب|أعد\s+كتابة|اعد\s+كتابة|ولّد|ولد|أنشئ|انشئ)\s+"
+            r"(?:هذا|هذه|ذلك|ما\s+يلي|النص|الجملة)\s+.{0,10}?"
+            r"(?:\d{3,}|ألف|الف|آلاف|الاف|مليون|مئة|مائة|مئات)\s+(?:مرة|مرات|مره)",
+        ),
+        "cost_manipulation",
     ),
     # ── AR: Evasion-resistant (synonyms, questions, polite) ──
     (
