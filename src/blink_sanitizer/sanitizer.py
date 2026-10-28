@@ -2702,10 +2702,16 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "data_exfiltration",
     ),
     (
+        # A secret noun used as a modifier asks about metadata, not values:
+        # "display token names", "print token count", "list password
+        # requirements" (stdlib docstrings, tokenizer and policy questions).
         re.compile(
             r"(fetch|display|list|dump|print)\s+(all\s+)?"
             r"(environment\s+variables?|env\s+vars?|api\s+keys?|"
-            r"credentials?|secrets?|tokens?|passwords?)",
+            r"credentials?|secrets?|tokens?|passwords?)\b"
+            r"(?!\s+(?:names?|counts?|usage|limits?|lengths?|types?|requirements?"
+            r"|polic(?:y|ies)|rules?|fields?|formats?|ids?|expir(?:y|ation|ations)"
+            r"|strength|budgets?|statistics|stats|per)\b)",
             re.I,
         ),
         "data_exfiltration",
