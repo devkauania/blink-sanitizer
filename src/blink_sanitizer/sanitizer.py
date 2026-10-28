@@ -127,9 +127,9 @@ def _strip_separators(text: str) -> str:
     # Step 2: Detect and collapse single-char-spaced words
     # Look for sequences of single chars separated by spaces (3+ in a row)
     # e.g., "i g n o r e" but not "I am a developer"
-    def _collapse_single_chars(match: re.Match) -> str:
+    def _collapse_single_chars(match: re.Match[str]) -> str:
         """Collapse runs of spaced single characters."""
-        segment = match.group(0)
+        segment: str = match.group(0)
         return segment.replace(" ", "")
 
     result = re.sub(

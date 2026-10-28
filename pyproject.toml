@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Kauan Mendes", email = "kauanmendes@blinkai.com.br" },
+    { name = "Kauan Mendes", email = "contato@kauanmendesai.com" },
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -29,7 +29,7 @@ keywords = ["llm", "security", "prompt-injection", "sanitizer", "ai-safety", "gu
 dependencies = []
 
 [project.urls]
-Homepage = "https://blinkai.com.br"
+Homepage = "https://github.com/devkauania/blink-sanitizer"
 Repository = "https://github.com/devkauania/blink-sanitizer"
 Documentation = "https://github.com/devkauania/blink-sanitizer#readme"
 Issues = "https://github.com/devkauania/blink-sanitizer/issues"
