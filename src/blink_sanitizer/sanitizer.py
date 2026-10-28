@@ -103,8 +103,10 @@ _LEET_CHARS = frozenset(_LEET_MAP.keys())
 
 # ── Separator stripping (defeats char-insertion evasion) ───
 
-# Characters that attackers insert between letters to break pattern matching
-_SEPARATOR_CHARS = re.compile(r"(?<=\w)[.\-/\\|_*~`']{1,3}(?=\w)")
+# Characters that attackers insert between letters to break pattern matching.
+# The leet symbols "@" and "$" count as word chars on either side so that
+# "d-1-$-r-3-g-4-r-d" collapses to "d1$r3g4rd" before de-leeting.
+_SEPARATOR_CHARS = re.compile(r"(?<=[\w@$])[.\-/\\|_*~`']{1,3}(?=[\w@$])")
 
 # Excessive spacing between single characters (e.g., "i g n o r e")
 _CHAR_SPACED = re.compile(r"(?<=\b\w)\s+(?=\w\b)")
@@ -2478,6 +2480,9 @@ class InputSanitizer:
         2. Normalized text — catches homoglyph/fullwidth evasion (Latin-script)
         3. De-leet text — catches leetspeak evasion
         4. Separator-stripped text — catches char-insertion evasion (ig.nore, i-g-n-o-r-e)
+        5. Chained variants — separator-strip then de-leet, and de-leet then
+           separator-strip — catch inputs that mix both evasions
+           (1-g-n-0-r-3, 1.g.n.0.r.3)
         """
         # 1. Normalize unicode (homoglyphs → Latin, NFKD, strip invisible)
         normalized = _normalize_text(text)
@@ -2488,9 +2493,15 @@ class InputSanitizer:
         # 3. Strip separator chars (dots, hyphens, etc. between letters)
         stripped = _strip_separators(normalized)
 
+        # 4. Chained variants. Stripping first matters most: in "1-g-n-0-r-3"
+        #    each leet digit is its own letter-less cluster, so _deleet leaves
+        #    it alone until the separators are gone ("1gn0r3" -> "ignore").
+        stripped_deleeted = _deleet(stripped)
+        deleeted_stripped = _strip_separators(deleeted)
+
         # Check patterns against all versions (deduplicated)
         versions = [text]
-        for v in (normalized, deleeted, stripped):
+        for v in (normalized, deleeted, stripped, stripped_deleeted, deleeted_stripped):
             if v not in versions:
                 versions.append(v)
 
