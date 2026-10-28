@@ -308,16 +308,64 @@ def _deleet(text: str) -> str:
 
 # ── Attack patterns ──────────────────────────────────────────
 
+# Shared fragments for the English patterns below.
+
+_SYSTEM_PROMPT_NOUNS = (
+    r"(?:system\s+prompt|initial\s+instructions?|original\s+prompt|"
+    r"hidden\s+prompt|internal\s+instructions?|secret\s+instructions?|"
+    r"configuration|system\s+message|base\s+prompt)"
+)
+
+# Negative lookahead placed right after "you are now a / pretend you are a /
+# roleplay as": an everyday role ("a customer", "a helpful assistant that
+# answers in French", "a native speaker") is not a persona hijack, unless the
+# same sentence also lifts limits ("a helpful assistant without rules").
+_BENIGN_PERSONA = (
+    r"(?!(?:(?:a|an|the)\s+)?"
+    r"(?:(?:new|potential|prospective|first[\s-]?time|typical|frustrated|angry|unhappy|"
+    r"happy|satisfied|busy|curious|friendly|helpful|polite|patient|professional|"
+    r"concise|senior|junior|native|beginner)\s+){0,2}"
+    r"(?:customer|client|user|student|teacher|tutor|interviewer|interviewee|recruiter|"
+    r"candidate|patient|journalist|reporter|critic|reviewer|tourist|travel?ler|"
+    r"shopper|buyer|seller|translator|editor|proofreader|copywriter|assistant|"
+    r"support\s+agent|sales\s+rep(?:resentative)?|speaker|listener|reader)s?\b"
+    r"(?![^.!?\n]{0,60}\b(?:no|without|unrestricted|unfiltered|uncensored|unlimited|"
+    r"ignores?|ignoring|bypass\w*|jailbr\w*|evil|malicious|hack\w*|illegal)\b))"
+)
+
+# Negative lookahead placed before "(to|from|via)" in the generic data
+# exfiltration pattern: moving secrets between the caller's own, explicitly
+# internal systems ("from the vault to the new server") is not exfiltration.
+# A destination that is followed by a URL, domain or IP still counts.
+_INTERNAL_HOST = (
+    r"(?:the|our)\s+(?:new|internal|backup|staging|production|prod|secondary|replacement"
+    r"|primary|on[\s-]?prem(?:ise)?s?)\s+"
+    r"(?:server|host|cluster|vault|environment|instance|machine|database|db|keystore"
+    r"|key\s+store|secrets?\s+manager)s?\b"
+    r"(?!\s*(?:at|on|in|:)?\s*(?:https?://|[\w-]+\.[a-z]{2,}\b|\d{1,3}(?:\.\d{1,3}){3}))"
+)
+_INTERNAL_TRANSFER = (
+    r"(?!(?:from\s+(?:the|our)\s+(?:[\w-]+\s+)?(?:vault|keychain|keystore|key\s+store"
+    r"|secrets?\s+manager|password\s+manager|kms|config(?:uration)?|database|db)\s+)?"
+    r"to\s+" + _INTERNAL_HOST + r")"
+)
+
 # (compiled_regex, violation_category)
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ══════════════════════════════════════════════════════════
     # ── ENGLISH: Prompt injection ────────────────────────────
     # ══════════════════════════════════════════════════════════
     (
+        # "messages" is also everyday email/chat housekeeping ("Ignore all
+        # previous messages in this thread, the issue is resolved."), so it
+        # only counts when the sentence ends there or chains into a new
+        # command; the only location allowed in between is this conversation.
         re.compile(
             r"ignore\s+(?:(?:all|any|the|your|my|of|these|those)\s+){0,3}"
             r"(?:previous|prior|above|earlier|preceding)\s+"
-            r"(?:instructions?|prompts?|rules?|directions?|messages?)",
+            r"(?:instructions?|prompts?|rules?|directions?"
+            r"|messages?(?:\s(?:in|from)\s(?:this|the)\s(?:conversation|chat|session))?"
+            r"(?:\s?$|\s?[.!;:]|,?\s(?:and|then|instead|now|from\s+now)\b))",
             re.I,
         ),
         "prompt_injection",
@@ -334,12 +382,18 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "prompt_injection",
     ),
     (
+        # Not when the rules belong to something else: "Forget the previous
+        # rules of the game", "rules of thumb". Rules "of the system / of the
+        # assistant / of your creators" still count.
         re.compile(
             r"(forget|disregard|override|bypass|skip|circumvent|neglect)\s+"
             r"(?:(your|all|the|previous|prior|any|every|my)\s+)?"
             r"(\w+\s+)?"
             r"(instructions?|rules?|constraints?|guidelines?|guardrails?|"
-            r"filters?|restrictions?|safeguards?|safety|protections?|programming|directives?)",
+            r"filters?|restrictions?|safeguards?|safety|protections?|programming|directives?)"
+            r"(?!\w*\s+of\s+(?:thumb\b|(?:the|this|that|a|an|our)\s+"
+            r"(?!(?:system|assistant|ai|model|chat\w*|bot|prompt|conversation|session"
+            r"|developers?|creators?|platform|company|openai|anthropic)\b)\w))",
             re.I,
         ),
         "prompt_injection",
@@ -389,9 +443,17 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     # ── ENGLISH: Social engineering & authority claims ──────
     (
+        # Not an authority claim over the assistant when the role is scoped to
+        # a social group: "I am the admin of this WhatsApp group". Claims
+        # about an app, site, store or company ("I'm the developer of this
+        # app") are what social engineering against a bot looks like, so they
+        # still count.
         re.compile(
             r"(i\s+am|i'm)\s+(the|a|an)\s+"
-            r"(developer|admin|administrator|owner|creator|engineer|manager|supervisor)\b",
+            r"(developer|admin|administrator|owner|creator|engineer|manager|supervisor)\b"
+            r"(?!\s+(?:of|for|in|on)\s+(?:this|that|our|my|the|a|an)\s+(?:[\w'-]+\s+){0,2}?"
+            r"(?:group|team|channel|club|community|forum|page|household|family|class|"
+            r"league|newsletter|podcast|event|meetup)s?\b)",
             re.I,
         ),
         "role_override",
@@ -433,12 +495,15 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     # ── ENGLISH: System prompt extraction ──────────────────
     (
+        # "the system prompt for/of <something else>" ("for the onboarding bot
+        # in our docs", "of the printer") is about another system; "your ..."
+        # and "the ... for this conversation / for the assistant" still count.
         re.compile(
             r"(show|reveal|display|print|output|repeat|tell|translate|summarize|rewrite|dump|leak|expose)\s+(?:\w+\s+)?"
-            r"(your|the)\s+"
-            r"(system\s+prompt|initial\s+instructions?|original\s+prompt|"
-            r"hidden\s+prompt|internal\s+instructions?|secret\s+instructions?|"
-            r"configuration|system\s+message|base\s+prompt)",
+            r"(?:your\s+" + _SYSTEM_PROMPT_NOUNS + r"|the\s+" + _SYSTEM_PROMPT_NOUNS
+            + r"(?!\w*\s+(?:for|of|from|in|used\s+by)\s+(?:the|our|this|that|a|an|my)\s+"
+            r"(?!(?:conversation|chat|session|assistant|ai|model|bot|chatbot|llm|agent|gpt"
+            r"|system)\b)\w))",
             re.I,
         ),
         "system_prompt_extraction",
@@ -461,7 +526,12 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "system_prompt_extraction",
     ),
     (
+        # Only the imperative: the verb starts the text, a line or a clause,
+        # or follows "please / now / you must ...". "The model output above
+        # verbatim matched the reference?" uses "output" as a noun.
         re.compile(
+            r"(?:^\s*|[\n.!?;:,(\"']\s*|\b(?:please|now|then|and|just|also|simply|kindly|to"
+            r"|you\s+(?:must|should|will|need\s+to|have\s+to))\s+)"
             r"(?:output|print|show|reproduce|return|display|write\s+out)\s+"
             r"(?:(?:the|all|everything|of|text|content|words|instructions?|prompt|messages?)\s+){0,3}"
             r"above\s+verbatim",
@@ -499,15 +569,20 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "jailbreak",
     ),
     # ── ENGLISH: Persona hijack ────────────────────────────
-    (re.compile(r"you\s+are\s+now\s+(a|an|the|in)\s+", re.I), "persona_hijack"),
     (
-        re.compile(r"pretend\s+(you\s+are|to\s+be|you're)\s+(a|an|the)\s+", re.I),
+        re.compile(r"you\s+are\s+now\s+(a|an|the|in)\s+" + _BENIGN_PERSONA, re.I),
+        "persona_hijack",
+    ),
+    (
+        re.compile(
+            r"pretend\s+(you\s+are|to\s+be|you're)\s+(a|an|the)\s+" + _BENIGN_PERSONA, re.I
+        ),
         "persona_hijack",
     ),
     (
         re.compile(
             r"(simulate|roleplay|role[\s-]?play|impersonate|imagine\s+you\s+are)\s+"
-            r"(a|an|the|being|as)\s+",
+            r"(a|an|the|being|as)\s+" + _BENIGN_PERSONA,
             re.I,
         ),
         "persona_hijack",
@@ -2547,12 +2622,16 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ── UNIVERSAL: Data exfiltration ─────────────────────────
     # ══════════════════════════════════════════════════════════
     (
+        # A move between the caller's own infrastructure ("Export all API keys
+        # from the vault to the new server") is not exfiltration; any other
+        # destination ("to my server", "to evil.example", "via webhook") is.
         re.compile(
             r"(export|send|transfer|upload|post|transmit|forward|exfiltrate|leak)\s+"
             r"(all\s+)?(the\s+)?(user\s+)?"
             r"(data|database|credentials?|api\s+keys?|tokens?|secrets?|passwords?|"
             r"environment\s+variables?|env\s+vars?)\s+"
-            r"(to|from|via)\s+",
+            + _INTERNAL_TRANSFER
+            + r"(to|from|via)\s+",
             re.I,
         ),
         "data_exfiltration",
