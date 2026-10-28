@@ -1,7 +1,9 @@
 """Blink Sanitizer — Prompt Injection Detection
 
-Pattern-based input sanitization — detects known attack patterns.
-Fast (~0ms), no LLM calls. Patterns cover OWASP LLM Top 10 categories.
+Pattern-based input sanitization — detects known attack patterns with
+compiled regexes, no LLM calls. Measured p50 ~0.34 ms / p95 ~0.71 ms per
+check on an Intel Core i5-12400F with CPython 3.12 (scripts/benchmark.py).
+This is a heuristic first layer, not a complete prompt-injection defense.
 
 Features:
 - Unicode NFKD normalization (homoglyphs, fullwidth, zero-width chars, bidi)
@@ -2434,11 +2436,11 @@ class InputSanitizer:
     """Checks prompts against known attack patterns.
 
     Returns a SanitizationResult indicating whether the prompt is allowed
-    and listing any violations found. Uses compiled regexes for ~0ms latency.
+    and listing any violations found. Uses compiled regexes (no LLM calls).
 
-    Session 1: now normalizes Unicode (NFKD + zero-width removal),
-    checks leetspeak variants, and accepts an optional context field
-    for indirect injection defense.
+    Normalizes Unicode (confusables, NFKD, zero-width/bidi removal), checks
+    leetspeak and separator-stripped variants, and accepts an optional
+    context field for indirect injection defense.
     """
 
     def check(
