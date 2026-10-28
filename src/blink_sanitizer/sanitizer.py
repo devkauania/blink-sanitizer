@@ -2879,8 +2879,10 @@ def _rejoin_split_words(text: str) -> str:
 _MAX_DECODE_DEPTH = 2
 _HTML_ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});?")
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
-# A form-encoded run of 3+ words: "ignore+all+previous+instructions".
-_PLUS_JOINED = re.compile(r"[^\W_]+(?:\+[^\W_]+){2,}")
+# A form-encoded run of 3+ words: "ignore+all+previous+instructions". The
+# lookbehind starts a match only at the beginning of a word; without it a
+# long word followed by one "+" was rescanned from every position (quadratic).
+_PLUS_JOINED = re.compile(r"(?<![^\W_])[^\W_]+(?:\+[^\W_]+){2,}")
 _BACKSLASH_ESCAPE = re.compile(
     r"\\(?:u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2}))"
 )
