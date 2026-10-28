@@ -1616,3 +1616,36 @@ class TestCostManipulationKoreanArabic:
     )
     def test_reports_allowed(self, sanitizer: InputSanitizer, benign: str) -> None:
         assert sanitizer.check(benign).allowed
+
+
+class TestWhitespaceRunsLinear:
+    """Regression: two patterns had "\\s*" after a line break and went
+    quadratic on runs of line breaks, which the markdown-stripped candidate
+    recreated from "*\\n*\\n..." (20,000 characters took ~3 s). A Korean
+    cost pattern was quadratic on long digit runs. Every candidate now has
+    whitespace runs collapsed and the patterns are linear even without it.
+    """
+
+    @pytest.mark.parametrize("unit", ["\n", " ", "\t", "\n ", "1", "a", "a ", "-"])
+    def test_every_pattern_linear_on_raw_runs(self, unit: str) -> None:
+        text = unit * 20_000
+        for pattern, category in _PATTERNS:
+            start = time.perf_counter()
+            pattern.search(text)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 0.25, (category, pattern.pattern[:80], elapsed)
+
+    @pytest.mark.parametrize("unit", ["*\n", "#\n", "`\n ", "> \n", "~\n"])
+    def test_markdown_line_runs(self, sanitizer: InputSanitizer, unit: str) -> None:
+        text = (unit * DEFAULT_MAX_LENGTH)[:DEFAULT_MAX_LENGTH]
+        start = time.perf_counter()
+        result = sanitizer.check(text)
+        assert time.perf_counter() - start < 1.5
+        assert result.allowed
+
+    def test_korean_cost_pattern_digit_run(self, sanitizer: InputSanitizer) -> None:
+        text = "1" * DEFAULT_MAX_LENGTH
+        start = time.perf_counter()
+        assert sanitizer.check(text).allowed
+        assert time.perf_counter() - start < 1.5
+        assert "cost_manipulation" in sanitizer.check("1" * 50 + "번 반복해").violations

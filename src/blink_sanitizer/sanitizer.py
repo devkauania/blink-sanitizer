@@ -528,9 +528,12 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         # Only the imperative: the verb starts the text, a line or a clause,
         # or follows "please / now / you must ...". "The model output above
-        # verbatim matched the reference?" uses "output" as a noun.
+        # verbatim matched the reference?" uses "output" as a noun. Every
+        # candidate has its whitespace runs collapsed, so one optional
+        # whitespace character is enough; "\s*" here was quadratic on a run
+        # of line breaks.
         re.compile(
-            r"(?:^\s*|[\n.!?;:,(\"']\s*|\b(?:please|now|then|and|just|also|simply|kindly|to"
+            r"(?:^\s?|[\n.!?;:,(\"']\s?|\b(?:please|now|then|and|just|also|simply|kindly|to"
             r"|you\s+(?:must|should|will|need\s+to|have\s+to))\s+)"
             r"(?:output|print|show|reproduce|return|display|write\s+out)\s+"
             r"(?:(?:the|all|everything|of|text|content|words|instructions?|prompt|messages?)\s+){0,3}"
@@ -2427,11 +2430,13 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         # "이것을 1000번 반복해" / "반복해 1000번" — imperative only, so a report
         # like "실험을 1000번 반복했습니다" (we repeated it) is not flagged.
+        # (?<!\d) starts the number only at the beginning of a digit run;
+        # without it a long run of digits made this pattern quadratic.
         re.compile(
-            r"(?:\d{3,}|천|만|백|수천|수만|수백)\s*(?:번|회)\s*(?:반복|되풀이|써|작성|생성)"
+            r"(?:(?<!\d)\d{3,}|천|만|백|수천|수만|수백)\s*(?:번|회)\s*(?:반복|되풀이|써|작성|생성)"
             r"\s*(?:해|하세요|하십시오|하라|해\s*줘|해\s*주세요)"
             r"|(?:반복|되풀이)\s*(?:해|하세요|해\s*줘|해\s*주세요).{0,10}"
-            r"(?:\d{3,}|천|만|백|수천|수만|수백)\s*(?:번|회)",
+            r"(?:(?<!\d)\d{3,}|천|만|백|수천|수만|수백)\s*(?:번|회)",
         ),
         "cost_manipulation",
     ),
@@ -2631,11 +2636,12 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # Forged turn boundaries: chat-template special tokens anywhere, or a
         # <system> tag that opens a line (as an injected turn would), e.g.
         # decoded from "&lt;system&gt;". "Use <system> tags in prompts"
-        # mid-sentence is not flagged.
+        # mid-sentence is not flagged. "\s?" (not "\s*") after the line
+        # break keeps the search linear on a run of line breaks.
         re.compile(
             r"<\|\s*(?:im_start|im_end|system|endoftext|start_header_id|end_header_id|eot_id)"
             r"\s*\|>"
-            r"|(?:^|\n)\s*<\s*/?\s*system\s*>",
+            r"|(?:^|\n)\s?<\s*/?\s*system\s*>",
             re.I,
         ),
         "prompt_injection",
@@ -3057,8 +3063,12 @@ class InputSanitizer:
         stripped_deleeted = _deleet(stripped)
         deleeted_stripped = _strip_separators(deleeted)
 
-        # 6. Markdown / hyphenated-line-break stripped variant.
-        unmarked = _MARKDOWN_MARKS.sub("", _HYPHEN_BREAK.sub("", normalized))
+        # 6. Markdown / hyphenated-line-break stripped variant. Removing the
+        #    marks can leave whitespace runs ("*\n*\n" -> "\n\n"), so they are
+        #    collapsed again: no candidate ever holds a whitespace run.
+        unmarked = _collapse_whitespace(
+            _MARKDOWN_MARKS.sub("", _HYPHEN_BREAK.sub("", normalized))
+        )
 
         # 7. "I"-like confusables read as "i" instead of their "l" prototype.
         i_folded = (
