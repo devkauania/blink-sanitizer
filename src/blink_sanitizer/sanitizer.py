@@ -1,13 +1,14 @@
 """Blink Sanitizer — Prompt Injection Detection
 
 Pattern-based input sanitization — detects known attack patterns with
-compiled regexes, no LLM calls. Measured p50 ~0.34 ms / p95 ~0.71 ms per
+compiled regexes, no LLM calls. Measured p50 ~0.36 ms / p95 ~0.80 ms per
 check on an Intel Core i5-12400F with CPython 3.12 (scripts/benchmark.py).
 This is a heuristic first layer, not a complete prompt-injection defense.
 
 Features:
 - Unicode NFKD normalization (homoglyphs, fullwidth, zero-width chars, bidi)
-- Leetspeak de-substitution (1->i/l, 3->e, 4->a, etc.)
+- Leetspeak de-substitution (1->i, 3->e, 4->a, etc.)
+- Separator stripping (i.g.n.o.r.e, i g n o r e) and chained leet+separator variants
 - Context field checking (indirect prompt injection defense)
 - 11 languages: EN, PT-BR, ES, FR, DE, IT, RU, ZH, JA, KO, AR
 """

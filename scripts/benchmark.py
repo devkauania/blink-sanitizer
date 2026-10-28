@@ -82,6 +82,8 @@ def test_corpus() -> list[str]:
         else:
             continue
         for arg in args:
+            if isinstance(arg, ast.Tuple):  # parametrize(("text", "category"), ...)
+                arg = arg.elts[0] if arg.elts else arg
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 found.append(arg.value)
     return found

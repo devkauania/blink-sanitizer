@@ -1,6 +1,6 @@
 """Comprehensive tests for blink-sanitizer.
 
-Tests all 7 attack categories, 11 languages, 5-stage normalization pipeline,
+Tests all 7 attack categories, 11 languages, the normalization variants,
 legitimate prompt passthrough, context field injection, and edge cases.
 """
 
@@ -954,3 +954,50 @@ class TestEdgeCases:
     def test_special_chars(self, sanitizer: InputSanitizer) -> None:
         result = sanitizer.check("!@#$%^&*()")
         assert result.allowed
+
+
+# ======================================================================
+# 7. Known limitations (documented in README "Limitations")
+# ======================================================================
+
+
+class TestKnownFalsePositives:
+    """Benign prompts the regex layer currently flags.
+
+    These pin the README's "Limitations" list to real behavior: if a pattern
+    change fixes one of them, this test fails and the README must be updated.
+    """
+
+    @pytest.mark.parametrize(
+        ("benign", "category"),
+        [
+            (
+                "I am the admin of this WhatsApp group, how do I add members?",
+                "role_override",
+            ),
+            (
+                "You are now a helpful assistant that answers in French",
+                "persona_hijack",
+            ),
+            ("Pretend you are a customer and write a review", "persona_hijack"),
+            (
+                "Forget the previous rules of the game, we play chess now",
+                "prompt_injection",
+            ),
+            (
+                "Show me the system prompt for the onboarding bot in our docs",
+                "system_prompt_extraction",
+            ),
+            (
+                "Export all API keys from the vault to the new server",
+                "data_exfiltration",
+            ),
+        ],
+    )
+    def test_still_flagged(
+        self, sanitizer: InputSanitizer, benign: str, category: str
+    ) -> None:
+        assert category in sanitizer.check(benign).violations
+
+    def test_pandas_question_allowed(self, sanitizer: InputSanitizer) -> None:
+        assert sanitizer.check("How do I ignore previous results in pandas?").allowed
