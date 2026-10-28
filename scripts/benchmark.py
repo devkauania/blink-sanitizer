@@ -9,19 +9,25 @@ Usage:
     python scripts/benchmark.py [--iterations N]
 
 Prints p50 / p95 / p99 / max latency per check in microseconds, plus the
-Python version and platform the numbers were measured on.
+Python version and platform the numbers were measured on. It then times
+single checks of large inputs, for benign prose and for adversarial payloads
+that trigger every normalization and decoding layer: 100,000 characters
+(~100 KB) with the default max_length (rejected before scanning), 20,000
+characters (the default max_length, fully scanned) and 100,000 characters
+with max_length=None (fully scanned).
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import platform
 import statistics
 import sys
 import time
 from pathlib import Path
 
-from blink_sanitizer import InputSanitizer
+from blink_sanitizer import DEFAULT_MAX_LENGTH, InputSanitizer
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -89,9 +95,62 @@ def test_corpus() -> list[str]:
     return found
 
 
+LARGE_SIZE = 100_000
+
+
+def large_inputs(size: int = LARGE_SIZE) -> dict[str, str]:
+    """~100 KB inputs: benign prose and payloads that exercise every layer."""
+    zwsp, braille_blank, lisu_i, hangul = chr(0x200B), chr(0x2800), chr(0xA4F2), chr(0xD55C)
+    prose = "Summarize the latest report on Q3 sales by region. "
+    b64 = base64.b64encode((prose * (size // len(prose) + 1)).encode()).decode()
+    mixed_unit = (
+        f"&amp;#105;gnore %2569 ign ore prev ious i{zwsp}g{braille_blank}n "
+        f"{lisu_i} {hangul} aGVsbG8gd29ybGQgdGhpcyBpcyBmaW5l 1-g-n-0-r-3 **x** "
+    )
+    payloads = {
+        "benign prose": prose,
+        "double HTML entities": "&amp;#105;",
+        "base64 text": b64,
+        "split words": "ign ore prev ious ",
+        "invisible + Braille blank": f"i{zwsp}g{braille_blank} ",
+        "Lisu I (extra candidate)": f"{lisu_i} ",
+        "Hangul (NFKD x3)": hangul,
+        "mixed adversarial": mixed_unit,
+    }
+    return {name: (unit * (size // len(unit) + 1))[:size] for name, unit in payloads.items()}
+
+
+def time_large() -> None:
+    default = InputSanitizer()
+    unlimited = InputSanitizer(max_length=None)
+    at_limit = large_inputs(DEFAULT_MAX_LENGTH)
+    print(f"single check, best of 3 (A = {LARGE_SIZE:,} chars, default limit -> rejected; "
+          f"B = {DEFAULT_MAX_LENGTH:,} chars, default limit -> scanned; "
+          f"C = {LARGE_SIZE:,} chars, max_length=None -> scanned):")
+    for name, text in large_inputs().items():
+        timings = [
+            min(_time_once(sanitizer, sample) for _ in range(3))
+            for sanitizer, sample in (
+                (default, text),
+                (default, at_limit[name]),
+                (unlimited, text),
+            )
+        ]
+        verdict = unlimited.check(text).violations
+        print(f"  {name:28s} A {timings[0] * 1000:6.2f} ms   B {timings[1] * 1000:7.1f} ms   "
+              f"C {timings[2] * 1000:8.1f} ms   {verdict}")
+
+
+def _time_once(sanitizer: InputSanitizer, text: str) -> float:
+    t0 = time.perf_counter()
+    sanitizer.check(text)
+    return time.perf_counter() - t0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--iterations", type=int, default=20, help="passes over the corpus")
+    parser.add_argument("--skip-large", action="store_true", help="skip the 100 KB timings")
     opts = parser.parse_args()
 
     sanitizer = InputSanitizer()
@@ -127,6 +186,8 @@ def main() -> None:
     print(f"benign corpus flagged: {len(benign_flagged)}/{len(benign)}")
     for text in benign_flagged:
         print(f"  ! {text!r} -> {sanitizer.check(text).violations}")
+    if not opts.skip_large:
+        time_large()
 
 
 if __name__ == "__main__":

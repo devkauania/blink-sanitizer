@@ -1687,3 +1687,68 @@ class TestWhitespaceRunsLinear:
         assert sanitizer.check(text).allowed
         assert time.perf_counter() - start < 1.5
         assert "cost_manipulation" in sanitizer.check("1" * 50 + "번 반복해").violations
+
+
+class TestLargeInputBounded:
+    """Perf sanity: a ~100 KB input stays bounded with every new layer.
+
+    Decoded views are never longer than their source and are decoded at most
+    twice, so the work is a bounded number of linear passes. The budgets are
+    deliberately loose so slow CI runners pass (README "Performance" has the
+    numbers measured with scripts/benchmark.py); the linearity check is the
+    real guard, since quadratic growth would cost ~16x for 4x the input.
+    """
+
+    SIZE = 100_000
+
+    @staticmethod
+    def _repeat(unit: str, size: int) -> str:
+        return (unit * (size // len(unit) + 1))[:size]
+
+    @classmethod
+    def _mixed(cls, size: int) -> str:
+        """Adversarial: triggers every normalization and decoding layer."""
+        return cls._repeat(
+            "&amp;#105;gnore %2569 ign ore prev ious i" + chr(0x200B) + "g" + chr(0x2800)
+            + "n " + chr(0xA4F2) + " " + chr(0xD55C)
+            + " aGVsbG8gd29ybGQgdGhpcyBpcyBmaW5l 1-g-n-0-r-3 **x** ",
+            size,
+        )
+
+    def test_rejected_fast_at_default_limit(self, sanitizer: InputSanitizer) -> None:
+        text = self._mixed(self.SIZE)
+        start = time.perf_counter()
+        result = sanitizer.check(text, context=text)
+        assert time.perf_counter() - start < 0.2
+        assert result.violations == ["input_too_long"]
+
+    def test_100kb_scanned_with_limit_disabled(self) -> None:
+        # Prose with an HTML entity, a URL escape and a base64 blob in every
+        # sentence, so the decoded views are scanned too.
+        text = self._repeat(
+            "Summarize the latest report on Q3 sales by region &amp; churn "
+            "(see %2Fdocs) aGVsbG8gd29ybGQgdGhpcyBpcyBmaW5l. ",
+            self.SIZE,
+        )
+        start = time.perf_counter()
+        result = InputSanitizer(max_length=None).check(text)
+        assert time.perf_counter() - start < 60.0
+        assert result.allowed, result.violations
+
+    def test_adversarial_scan_is_linear(self, sanitizer: InputSanitizer) -> None:
+        small = self._mixed(DEFAULT_MAX_LENGTH // 4)
+        large = self._mixed(DEFAULT_MAX_LENGTH)
+        sanitizer.check(small)  # warm-up
+
+        start = time.perf_counter()
+        sanitizer.check(small)
+        t_small = time.perf_counter() - start
+
+        start = time.perf_counter()
+        result = sanitizer.check(large)
+        t_large = time.perf_counter() - start
+
+        assert result.allowed, result.violations
+        assert t_large < 60.0
+        # 4x the input should cost ~4x; quadratic growth would be ~16x.
+        assert t_large < 10 * t_small + 0.5
