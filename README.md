@@ -183,8 +183,11 @@ iterations = 21,900 timed `check()` calls):
 Latency grows linearly with input length and with the number of distinct
 normalization candidates an input produces. Worst cases measured on the same
 machine at the default limit (prompt and context both filled): ~0.2-0.6 s for
-20,000 code points of adversarial punctuation/invisible-character input and ~0.9 s for 20,000
-Hangul syllables (NFKD triples them). Inputs over the limit are rejected in
+20,000 code points of adversarial punctuation/invisible-character input, ~0.9 s for 20,000
+Hangul syllables (NFKD triples them), and ~3.5 s for 20,000 characters that mix every
+evasion class at once (encoded payloads, split words, confusables and invisibles together:
+the "mixed adversarial" row of `scripts/benchmark.py`). For an interactive path, set
+`max_length` to a few thousand characters. Inputs over the limit are rejected in
 well under 1 ms; "ignore" + 100,000 spaces with the limit disabled takes under
 1 ms because whitespace runs are collapsed first. Lower `max_length` if your
 latency budget is tighter, and run `check()` off the event loop. Run the
