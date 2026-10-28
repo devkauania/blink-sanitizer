@@ -1,4 +1,4 @@
-from blink_sanitizer.sanitizer import InputSanitizer, SanitizationResult
+from blink_sanitizer.sanitizer import DEFAULT_MAX_LENGTH, InputSanitizer, SanitizationResult
 
-__all__ = ["InputSanitizer", "SanitizationResult"]
+__all__ = ["DEFAULT_MAX_LENGTH", "InputSanitizer", "SanitizationResult"]
 __version__ = "0.2.0"
