@@ -31,6 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "src" / "blink_sanitizer" / "_confusables.py"
+LICENSE = ROOT / "LICENSES" / "Unicode-3.0.txt"
 
 _ASCII_ALNUM = re.compile(r"[A-Za-z0-9]{1,3}")
 
@@ -84,14 +85,16 @@ def main() -> None:
         f"        Date: {date}",
         f"        sha256: {hashlib.sha256(raw).hexdigest()}",
         "",
-        "Derived from Unicode data files. Copyright (c) 1991-2026 Unicode, Inc.",
-        "Used under the Unicode License v3; the full notice is in",
-        "LICENSES/Unicode-3.0.txt.",
+        "Derived from Unicode data files and used under the Unicode License v3,",
+        "whose copyright and permission notice is reproduced in the comment",
+        "block below (also in LICENSES/Unicode-3.0.txt in the source tree).",
         "",
         "Only single non-ASCII source code points whose prototype is 1-3 ASCII",
         "letters/digits, and that NFKD does not already fold to ASCII, are kept",
         "(see scripts/gen_confusables.py for the rules).",
         '"""',
+        *(f"# {line}".rstrip() for line in LICENSE.read_text(encoding="utf-8").splitlines()),
+        "",
         "from __future__ import annotations",
         "",
         f'UNICODE_CONFUSABLES_VERSION = "{version}"',
