@@ -2614,6 +2614,90 @@ def _normalize_text(text: str) -> str:
     return _normalize_variants(text)[0]
 
 
+# ── Re-joining keywords split by spaces ("ign ore", "dis regard") ─
+#
+# _strip_separators only rejoins runs of single characters ("i g n o r e").
+# A keyword cut into longer fragments ("ign ore all prev ious instruc tions")
+# is rejoined here, guarded so ordinary prose is not rewritten: 2-4 adjacent
+# fragments are merged only when their concatenation is exactly a word that
+# occurs literally in one of the attack patterns (the vocabulary below is
+# extracted from _PATTERNS). The result is one extra candidate; a match still
+# needs the whole attack phrase, so merging "for get" alone flags nothing.
+
+_REGEX_ESCAPE = re.compile(r"\\[A-Za-z]")
+_VOCAB_WORD = re.compile(r"[^\W\d_]{4,}")
+_MAX_REJOIN_FRAGMENTS = 4
+
+
+def _rejoin_vocabulary() -> frozenset[str]:
+    words: set[str] = set()
+    for pattern, _ in _PATTERNS:
+        source = _REGEX_ESCAPE.sub(" ", pattern.pattern)  # "\bignore" -> " ignore"
+        for word in _VOCAB_WORD.findall(source):
+            word = word.lower()
+            words.add(word)
+            if word.endswith("s"):  # "instructions?" also covers "instruction"
+                words.add(word[:-1])
+    return frozenset(words)
+
+
+_REJOIN_VOCAB = _rejoin_vocabulary()
+
+
+def _split_affixes(token: str) -> tuple[str, str, str]:
+    """Split "(ign" into ("(", "ign", "") and "tions." into ("", "tions", ".")."""
+    start, end = 0, len(token)
+    while start < end and not token[start].isalpha():
+        start += 1
+    while end > start and not token[end - 1].isalpha():
+        end -= 1
+    return token[:start], token[start:end], token[end:]
+
+
+def _rejoin_split_words(text: str) -> str:
+    """Merge space-separated fragments that together spell a pattern keyword.
+
+    "ign ore all prev ious instruc tions" -> "ignore all previous instructions".
+    Fragments must be letters only; leading punctuation on the first fragment
+    and trailing punctuation on the last are kept. Linear in the input size.
+    """
+    tokens = text.split(" ")
+    n = len(tokens)
+    if n < 2:
+        return text
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < n:
+        merged = False
+        for k in range(min(_MAX_REJOIN_FRAGMENTS, n - i), 1, -1):
+            lead, first, trail = _split_affixes(tokens[i])
+            if trail or not first:
+                break
+            cores = [first]
+            ok = True
+            last_post = ""
+            for j in range(i + 1, i + k):
+                pre, core, post = _split_affixes(tokens[j])
+                if pre or not core or (post and j != i + k - 1):
+                    ok = False
+                    break
+                cores.append(core)
+                last_post = post
+            if not ok or not all(c.isalpha() for c in cores):
+                continue
+            word = "".join(cores)
+            if word.lower() in _REJOIN_VOCAB:
+                out.append(lead + word + last_post)
+                i += k
+                merged = changed = True
+                break
+        if not merged:
+            out.append(tokens[i])
+            i += 1
+    return " ".join(out) if changed else text
+
+
 DEFAULT_MAX_LENGTH = 20_000
 """Default per-field limit, in code points, for :class:`InputSanitizer`."""
 
@@ -2698,6 +2782,8 @@ class InputSanitizer:
            (1-g-n-0-r-3, 1.g.n.0.r.3)
         7. Markdown-stripped text — catches emphasis splits (**ignore** all ...)
            and hyphenated line breaks (ig-<newline>nore)
+        8. "I"-as-"i" text — confusables whose prototype is "l" read as "i"
+        9. Re-joined text — keywords split by spaces (ign ore, dis regard)
         """
         # 0. Size limit on the raw text, before any work (fail closed).
         if self._too_long(text):
@@ -2737,6 +2823,11 @@ class InputSanitizer:
             else _normalize_variants(original, _CONFUSABLES_TABLE_I)[0]
         )
 
+        # 8. Keywords split by spaces re-joined ("ign ore", "prev ious"); also
+        #    after de-leet ("1gn ore") and after single-char collapsing
+        #    ("i g n ore" -> "ign ore" -> "ignore").
+        rejoined = [_rejoin_split_words(v) for v in (normalized, deleeted, stripped)]
+
         # Check patterns against all versions (deduplicated)
         versions = [original]
         for v in (
@@ -2748,6 +2839,7 @@ class InputSanitizer:
             stripped_deleeted,
             deleeted_stripped,
             unmarked,
+            *rejoined,
         ):
             if v not in versions:
                 versions.append(v)
