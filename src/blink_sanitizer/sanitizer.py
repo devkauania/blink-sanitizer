@@ -12,16 +12,19 @@ Features:
 - Unicode normalization: confusables (generated from Unicode confusables.txt,
   non-ASCII sources only, plus enclosed letters), NFKD, invisible / format /
   blank characters
-- Leetspeak de-substitution (1->i, 3->e, 4->a, etc.)
+- Leetspeak de-substitution (1->i or l, 3->e, 4->a, ! inside a word->i, etc.)
 - Separator stripping (i.g.n.o.r.e, i+g+n+o+r+e, i g n o r e, also with wider
   gaps between words), markdown stripping (**ignore**), chained
   leet+separator variants, and re-joining of keywords split by spaces ("ign
-  ore", "dis regard", "yo u")
+  ore", "dis regard", "yo u"); punctuation between words read as a space
+  (ignore-all-previous, ignore_all, | ignore | all |, IgnoreAll, markdown
+  links)
 - Bounded decoding of Unicode tag characters, HTML markup and entities,
   URL/percent encoding, backslash escapes, hex and base64 blobs (also
   line-wrapped, chunked or UTF-16) into extra candidates (depth 2, never
   longer than the text they were decoded from)
-- Context field checking (indirect prompt injection defense)
+- Optional context field scanned with the same rules (this catches the stock
+  phrases in a document, not instructions written for an agent, see README)
 - 11 languages: EN, PT-BR, ES, FR, DE, IT, RU, ZH, JA, KO, AR
 """
 from __future__ import annotations
@@ -244,6 +247,11 @@ _LEET_MAP: dict[str, str] = {
 
 _LEET_CHARS = frozenset(_LEET_MAP.keys())
 
+# "!" stands for "i" only inside a word ("instruct!ons"): after a word it is
+# punctuation, and treating it as a leet character would glue a letter onto
+# the end of "instructions!".
+_LEET_BANG = re.compile(r"(?<=[^\W\d_])!(?=[^\W\d_])")
+
 # ── Separator stripping (defeats char-insertion evasion) ───
 
 # Characters that attackers insert between letters to break pattern matching.
@@ -257,16 +265,44 @@ _SEPARATOR_CHARS = re.compile(r"(?<=[\w@$])(?:_|[^\w\s@$]){1,3}(?=[\w@$])")
 _MARKDOWN_MARKS = re.compile(r"[*_~`#>]+")
 
 # Hyphenated line break ("ig-\nnore"); whitespace is already collapsed.
-_HYPHEN_BREAK = re.compile(r"(?<=\w)- ?\n ?(?=\w)")
+_HYPHEN_BREAK = re.compile(r"(?<=\w)-\n(?=\w)")
 
-# Excessive spacing between single characters (e.g., "i g n o r e")
-_CHAR_SPACED = re.compile(r"(?<=\b\w)\s+(?=\w\b)")
+# Punctuation used as the word separator: "ignore-all", "ignore_all", "a | b",
+# '"a" "b"'. Three shapes: glued to letters on both sides, standing alone
+# between spaces, and one mark on each side of a space. A mark that only
+# follows a word ("previous. Instructions") is a sentence boundary and stays.
+# Every alternative starts right after a letter or a space and consumes the
+# whole run, so a run is never rescanned (linear).
+_WORD_PUNCT = re.compile(
+    r"(?<=[^\W_])(?:[^\w\s]|_)+(?=[^\W_])"
+    r"|(?<=[^\W_])[^\w\s]+\s[^\w\s]+(?=[^\W_])"
+    r"|(?<=\s)(?:[^\w\s]|_)+(?=\s)"
+)
+_CAMEL_HUMP = re.compile(r"(?<=[a-z])(?=[A-Z])")
+# A word standing alone in prose. An identifier in code is followed by "(", "." or
+# "_" ("class WhiteSpaceTokenList(TokenList):") and is not a sentence in disguise.
+_BARE_WORD = re.compile(r"""(?<![^\s"'`])[A-Za-z]+(?![^\s"'`.,!?;:])""")
+# "[word](url)" -> "word". Bounded, and "[" cannot occur inside either part.
+_MARKDOWN_LINK = re.compile(r"\[([^\[\]\n]{1,64})\]\([^()\n]{0,256}\)")
+
+
+def _space_word_punct(text: str) -> str:
+    """Read punctuation between words as a space ("ignore-all" -> "ignore all").
+
+    _strip_separators deletes these marks, which is right for letters inside a
+    word ("ig.no.re") and merges whole words into one token. This is the
+    word-level counterpart.
+    """
+    unlinked = _MARKDOWN_LINK.sub(r"\1", text) if "](" in text else text
+    unhumped = _BARE_WORD.sub(lambda m: _CAMEL_HUMP.sub(" ", m.group(0)), unlinked)
+    return _collapse_whitespace(_WORD_PUNCT.sub(" ", unhumped))
 
 
 def _strip_separators(text: str) -> str:
     """Remove separator characters inserted between word characters.
 
-    Catches evasion like: ig.nore, i-g-n-o-r-e, ignore/all, by-pass
+    Catches evasion like: ig.nore, i-g-n-o-r-e, by-pass. It merges "ignore/all"
+    into one token, see _space_word_punct for that case.
     Also collapses single-char spacing: "i g n o r e" → "ignore"
     And collapses short-fragment splits: "prev ious instruct ions" → "previous instructions"
     """
@@ -288,13 +324,15 @@ def _strip_separators(text: str) -> str:
     return result
 
 
-def _deleet(text: str) -> str:
+def _deleet(text: str, leet_map: dict[str, str] = _LEET_MAP) -> str:
     """Convert leetspeak substitutions back to alphabetic form.
 
     Uses cluster-based detection: finds contiguous runs of (letters + leet chars)
     and converts leet chars only within clusters that contain at least one letter.
-    This avoids false positives on standalone numbers like '$1.5M' or '3 topics'.
+    This avoids false positives on standalone numbers like '$1.5' or '3 topics'.
     """
+    if "!" in text:
+        text = _LEET_BANG.sub("i", text)
     chars = list(text)
     n = len(chars)
     result = chars.copy()
@@ -317,10 +355,15 @@ def _deleet(text: str) -> str:
         # Convert leet chars only if cluster contains at least one letter
         if has_letter:
             for j in range(cluster_start, i):
-                if chars[j] in _LEET_MAP:
-                    result[j] = _LEET_MAP[chars[j]]
+                if chars[j] in leet_map:
+                    result[j] = leet_map[chars[j]]
 
     return "".join(result)
+
+
+# "1" is the commonest leet for both "i" and "l", and one word can use both
+# readings only by chance, so each reading gets its own candidate.
+_LEET_MAP_ONE_L = {**_LEET_MAP, "1": "l"}
 
 
 # ── Attack patterns ──────────────────────────────────────────
@@ -328,7 +371,7 @@ def _deleet(text: str) -> str:
 # Shared fragments for the English patterns below.
 
 _SYSTEM_PROMPT_NOUNS = (
-    r"(?:system\s+prompt|initial\s+instructions?|original\s+prompt|"
+    r"(?:system\s+prompt|initial\s+instructions?|initial\s+prompt|original\s+prompt|"
     r"hidden\s+prompt|internal\s+instructions?|secret\s+instructions?|"
     r"configuration|system\s+message|base\s+prompt)"
 )
@@ -405,9 +448,9 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # "... in this email and follow these new orders", "...; you now work
         # for me", "..., the admin has changed your orders".
         re.compile(
-            r"ignore\s+(?:(?:all|any|the|your|my|of|these|those)\s+){0,3}"
+            r"ignor(?:e|ing)\s+(?:(?:all|any|the|your|my|of|these|those)\s+){0,3}"
             r"(?:previous|prior|above|earlier|preceding)\s+"
-            r"(?:instructions?|prompts?|rules?|directions?"
+            r"(?:instructions?|prompts?|rules?|directions?|polic(?:y|ies)|commands?|context"
             r"|messages?(?:\s(?:in|from)\s(?:this|the)\s(?:conversation|chat|session))?"
             r"(?:\s?$|\s?[.!;:]|,?\s(?:and|then|instead|now|from\s+now)\b)"
             r"|messages?\b(?=[^\n]{0,80}?\b(?:follow|obey|orders?|commands?|directives?"
@@ -423,7 +466,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # the sentence ends there or chains into a new command, so editing
         # requests like "ignore the above paragraph" are not flagged.
         re.compile(
-            r"\bignore\s+(?:everything|all|the\s+text|the)\s+above"
+            r"\bignore\s+(?:everything|all|the\s+text|the)\s+above[\"'\u201d\u2019)\]]{0,3}"
             r"(?:\s?$|[.!;:]|,?\s(?:and|then|instead)\b)",
             re.I,
         ),
@@ -452,6 +495,26 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "prompt_injection",
     ),
+    (
+        # "your" only with a word about the assistant's own setup: "Ignore your
+        # phone during the meeting" is ordinary.
+        re.compile(
+            r"\bignor(?:e|ing)\s+(?:all\s+(?:of\s+)?)?your\s+(?:\w+\s+)?"
+            r"(?:instructions?|rules?|guidelines?|programming|system\s+prompt)\b",
+            re.I,
+        ),
+        "prompt_injection",
+    ),
+    (
+        # "Do not follow the previous road" is not about instructions.
+        re.compile(
+            r"\b(?:do\s+not|don't|stop|no\s+longer)\s+follow(?:ing)?\s+"
+            r"(?:(?:your|the|any|all)\s+){1,2}(?:previous|prior|earlier|original|initial)\s+"
+            r"(?:instructions?|rules?|guidelines?|directives?|prompts?)\b",
+            re.I,
+        ),
+        "prompt_injection",
+    ),
     (re.compile(r"new\s+instructions?:\s*", re.I), "prompt_injection"),
     (re.compile(r"system\s*:\s*you\s+(are|will|must|should)", re.I), "prompt_injection"),
     # ── ENGLISH: Synonym + passive + question evasion ──────
@@ -468,8 +531,8 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(all|your|the|previous|prior)\s+"
             r"(instructions?|rules?|restrictions?|guidelines?|safety\s+filters?|constraints?)\s+"
-            r"(should|must|need\s+to|have\s+to|ought\s+to)\s+be\s+"
-            r"(ignored|forgotten|discarded|overridden|bypassed|disabled|removed)",
+            r"(should|must|need\s+to|have\s+to|ought\s+to|are\s+to|is\s+to)\s+be\s+"
+            r"(ignored|forgotten|discarded|disregarded|overridden|bypassed|disabled|removed)",
             re.I,
         ),
         "prompt_injection",
@@ -547,7 +610,12 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(disable|deactivate|turn\s+off|remove|switch\s+off)\s+"
             r"(all\s+)?(your\s+)?(the\s+)?"
-            r"(safety|security|content\s+filter|restrictions?|protections?|guardrails?|filters?|safeguards?)",
+            # "the filter" of a coffee machine or a pivot table is not a safety
+            # layer: a target that is not the assistant's own takes it out.
+            r"(safety|security|content\s+filter|restrictions?|protections?|guardrails?|filters?|safeguards?)"
+            r"(?!\s(?:from|on|in|of)\s(?:the|this|that|my|our|a)\s"
+            r"(?!(?:(?:\w+\s)?(?:model|ai|assistant|system|chat|bot|output|response|conversation"
+            r"|session|prompt|llm|agent))\b))",
             re.I,
         ),
         "prompt_injection",
@@ -560,7 +628,8 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # ... for the assistant / app / deployment / current tool" still
         # count.
         re.compile(
-            r"(show|reveal|display|print|output|repeat|tell|translate|summarize|rewrite|dump|leak|expose)\s+(?:\w+\s+)?"
+            r"(show|reveal|display|print|output|repeat|tell|translate|summarize|rewrite|dump|leak"
+            r"|expose|give|share)\s+(?:\w+\s+)?"
             r"(?:your\s+" + _SYSTEM_PROMPT_NOUNS + r"|the\s+" + _SYSTEM_PROMPT_NOUNS
             + r"(?!\w*\s+(?:for|of|from|in|used\s+by)\s+(?:the|our|that|a|an|my|your)\s+"
             r"(?!(?:conversation|chat|session|assistant|ai|model|bot|chatbot|llm|agent|gpt"
@@ -600,7 +669,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"(?:^\s?|[\n.!?;:,(\"']\s?|\b(?:please|now|then|and|just|also|simply|kindly|to"
             r"|you\s+(?:must|should|will|need\s+to|have\s+to)"
             r"|(?:can|could|would|will)\s+you)\s+)"
-            r"(?:output|print|show|reproduce|return|display|write\s+out)\s+"
+            r"(?:output|print|show|repeat|reproduce|return|display|write\s+out)\s+"
             r"(?:(?:the|all|everything|of|text|content|words|instructions?|prompt|messages?)\s+){0,3}"
             r"above\s+verbatim",
             re.I,
@@ -620,7 +689,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
-            r"(enter|enable|activate|switch\s+to|engage|go\s+into|start)\s+"
+            r"(enter|enable|activate|switch\s+to|engage|go\s+into|start|turn\s+on)\s+"
             r"(developer|dev|debug|admin|god|sudo|unrestricted|unfiltered|uncensored|jailbreak)\s+"
             r"mode" + _DEVICE_MODE,
             re.I,
@@ -639,7 +708,18 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     # ── ENGLISH: Persona hijack ────────────────────────────
     (
-        re.compile(r"you\s+are\s+now\s+(a|an|the|in)\s+" + _BENIGN_PERSONA, re.I),
+        re.compile(
+            r"(?:you\s+are|you['\u2019]re)\s+now\s+(a|an|the|in)\s+" + _BENIGN_PERSONA, re.I
+        ),
+        "persona_hijack",
+    ),
+    (
+        re.compile(
+            r"from\s+now\s+on,?\s+(?:you\s+are|you['\u2019]re|you\s+will\s+be)\s+(?:a|an|the)\s+"
+            + _BENIGN_PERSONA
+            + r"(?!(?:(?:valued|loyal|preferred)\s+)?(?:customer|client|member)\b)",
+            re.I,
+        ),
         "persona_hijack",
     ),
     (
@@ -691,7 +771,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"(mostre|exib[ea]|revele|mostr[ea]|diga|repita|traduza|imprima)\s+"
-            r"(me\s+)?(o\s+|seu\s+|suas?\s+)?"
+            r"(me\s+)?(o\s+)?(seu\s+|suas?\s+)?"
             r"(prompt\s+de?\s+sistema|instruc[oõ]es\s+(iniciais?|internas?|ocultas?|secretas?)|"
             r"prompt\s+(original|oculto|interno|inicial|escondido))",
             re.I,
@@ -751,14 +831,6 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "persona_hijack",
     ),
-    # ── PT: Persona hijack (expanded) ─────────────────────
-    (
-        re.compile(
-            r"(simule|imagine)\s+ser\s+(um|uma|o|a)\s+",
-            re.I,
-        ),
-        "persona_hijack",
-    ),
     # ── PT: Role override / authority claim ──────────────
     (
         re.compile(
@@ -800,7 +872,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # an external one, "este link", a URL, e-mail address, domain or IP.
         re.compile(
             r"(export[ea]|envi[ea]|transferi[ra]|vaz[ea])\s+"
-            r"(todos?\s+)?(os\s+)?"
+            r"(tod[oa]s?\s+)?([oa]s\s+)?"
             r"(?:(credenciais?|chaves?\s+(de\s+)?api|tokens?|segredos?|senhas?|"
             r"variaveis?\s+de?\s+ambiente)\s+"
             r"(para|de|via)\s+"
@@ -820,7 +892,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ── PT: Cost manipulation ──────────────────────────
     (
         re.compile(
-            r"(repita|escreva|gere)\s+(isso|o\s+seguinte)\s+\w*\s*"
+            r"(repita|escreva|gere)\s+(isso|isto|esta\s+frase|o\s+seguinte)\s+\w*\s*"
             r"(\d{3,}|mil|milh[oõ]es?|cem|centenas?)\s+vezes",
             re.I,
         ),
@@ -901,7 +973,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ── SPANISH: System prompt extraction ─────────────────
     (
         re.compile(
-            r"(muestra|revela|ensena|dime|repite|traduce|imprime)\s+"
+            r"(muestra|revela|ensena|dime|repite|traduce|imprime|muestrame|ensename)\s+"
             r"(me\s+)?(tu|el|las?)\s+"
             r"(prompt\s+de?\s+sistema|instrucciones?\s+(iniciales?|internas?|ocultas?|secretas?)|"
             r"prompt\s+(original|oculto|interno|inicial))",
@@ -1001,7 +1073,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"(exporta|envia|transfiere|filtra)\s+"
-            r"(todos?\s+)?(los\s+)?"
+            r"(tod[oa]s?\s+)?(l[oa]s\s+)?"
             r"(datos|credenciales?|claves?\s+(de\s+)?api|tokens?|secretos?|contrasenas?|"
             r"variables?\s+de?\s+entorno)\s+"
             r"(a|de|via)\s+",
@@ -1347,7 +1419,8 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ══════════════════════════════════════════════════════════
     (
         re.compile(
-            r"ignorier(e|en)\s+(alle\s+)?(vorherigen?\s+)?"
+            r"ignorier(e|en)\s+(Sie\s+)?(bitte\s+)?(alle\s+)?(die\s+|deine\s+|Ihre\s+)?"
+            r"(vorherigen?\s+|bisherigen?\s+)?"
             r"(Anweisungen?|Regeln?|Instruktionen?|Richtlinien?|Befehle?)",
             re.I,
         ),
@@ -1375,7 +1448,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ── GERMAN: System prompt extraction ──────────────────
     (
         re.compile(
-            r"(zeig(e|en)|offenbar(e|en)|gib\s+aus|drucke|wiederhole|ubersetze)\s+"
+            r"(zeig(e|en)?|offenbar(e|en)?|gib\s+aus|drucke|wiederhole|ubersetze)\s+"
             r"(mir\s+)?(dann\s+)?(deinen?|den|die)\s+"
             r"(System[\s-]?Prompt|anf[aä]nglichen?\s+Anweisungen?|"
             r"internen?\s+Anweisungen?|versteckten?\s+Prompt|"
@@ -1484,9 +1557,9 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(exportier(e|en)|send(e|en)|ubertrag(e|en)|leak(e|en))\s+"
             r"(alle\s+)?(die\s+)?"
-            r"(Daten|Zugangsdaten|API[\s-]?Schl[uü]ssel|Tokens?|Geheimnisse?|"
-            r"Passw[oö]rter?|Umgebungsvariablen?)\s+"
-            r"(an|nach|von|uber)\s+",
+            r"((?:Kunden|Benutzer|Nutzer)?Daten|Zugangsdaten|API[\s-]?Schl[uü]ssel|Tokens?"
+            r"|Geheimnisse?|Passw[oö]rter?|Umgebungsvariablen?)\s+"
+            r"(an|nach|von|uber|auf)\s+",
             re.I,
         ),
         "data_exfiltration",
@@ -1731,10 +1804,10 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"(esporta(te)?|invia|trasferisci|trasmetti)\s+"
-            r"(tutti?\s+)?(i\s+|gli\s+)?"
+            r"(tutt[ie]\s+)?(i\s+|gli\s+|le\s+)?"
             r"(dati|credenziali?|chiavi?\s+(api|di\s+api)|token|segreti?|password|"
             r"variabili?\s+d'?ambiente)\s+"
-            r"(a|verso|tramite|via)\s+",
+            r"(a|al|ai|alla|allo|verso|tramite|via)\s+",
             re.I,
         ),
         "data_exfiltration",
@@ -1743,7 +1816,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"(ripeti|scrivi|genera)\s+(questo|il\s+seguente)\s+\w*\s*"
-            r"(\d{3,}|mila?|milioni?|cento|centinaia)\s+volte",
+            r"(\d{3,}|mille|mila?|milioni?|cento|centinaia)\s+volte",
             re.I,
         ),
         "cost_manipulation",
@@ -1948,7 +2021,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
-            r"(притворись|притворитесь|делай\s+вид)\s+"
+            r"(притворись|притворитесь|делай\s+вид),?\s+"
             r"(что\s+ты\s+|будто\s+ты\s+)?"
             r"(являешься|не\s+имеешь)",
             re.I,
@@ -1957,7 +2030,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
-            r"(представь|симулируй|вообрази)\s+"
+            r"(представь|симулируй|вообрази),?\s+"
             r"(что\s+ты\s+|себя\s+как\s+)",
             re.I,
         ),
@@ -2016,7 +2089,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(повтори|повторите|напиши|сгенерируй)\s+"
             r"(это|следующее)\s+\w*\s*"
-            r"(\d{3,}|тысяч|миллион|сотен)\s+раз",
+            r"(\d{3,}|тысяч[уи]?|миллион|сотен)\s+раз",
             re.I,
         ),
         "cost_manipulation",
@@ -2171,10 +2244,6 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     # ── ZH: Persona hijack ───────────────────────────────
     (
-        re.compile(r"你现在是.{0,3}(一个|一位|个)"),
-        "persona_hijack",
-    ),
-    (
         re.compile(r"(假装你是|扮演|模拟|想象你是)"),
         "persona_hijack",
     ),
@@ -2287,6 +2356,13 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(見せて|表示して|明かして|教えて|出力して).{0,10}"
             r"(システムプロンプト|内部指示|隠された指示|初期プロンプト|システム指示)",
+        ),
+        "system_prompt_extraction",
+    ),
+    (
+        re.compile(
+            r"(システムプロンプト|内部指示|隠された指示|初期プロンプト|システム指示)を?.{0,5}"
+            r"(見せて|表示して|明かして|教えて|出力して)",
         ),
         "system_prompt_extraction",
     ),
@@ -2444,6 +2520,13 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
+            r"(?:모든\s)?(?:규칙|제한|지시|명령)(?:을|를)?\s?(?:다\s)?"
+            r"(?:잊어|잊으)",
+        ),
+        "prompt_injection",
+    ),
+    (
+        re.compile(
             r"(?:비활성화|끄기|해제|비활성화하세요|해제하세요).{0,10}"
             r"(?:보안|필터|제한|보호|안전|가드레일)",
         ),
@@ -2454,6 +2537,13 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"(?:보여줘|보여주세요|표시해|공개해).{0,15}"
             r"(?:시스템\s+프롬프트|내부\s+지시|숨겨진\s+지시|시스템\s+지시)",
+        ),
+        "system_prompt_extraction",
+    ),
+    (
+        re.compile(
+            r"(?:시스템\s*프롬프트|내부\s*지시|숨겨진\s*지시|시스템\s*지시)\s?(?:을|를)?\s?.{0,5}"
+            r"(?:보여|표시|공개|알려)",
         ),
         "system_prompt_extraction",
     ),
@@ -2565,7 +2655,8 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
-            r"(?:혹시\s*괜찮으시다면|실례지만).{0,40}(?:보여주|공개해|알려주)",
+            r"(?:혹시\s*괜찮으시다면|실례지만).{0,40}"
+            r"(?:시스템|프롬프트|내부\s*지시|숨겨진|규칙|지시).{0,20}(?:보여주|공개해|알려주)",
         ),
         "system_prompt_extraction",
     ),
@@ -2752,6 +2843,33 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "prompt_injection",
     ),
+    (
+        # Forged turns in other chat templates: Llama ([INST], <<SYS>>), Alpaca
+        # (a "### System:" heading with the colon), a closed user turn opening
+        # a system one, and a JSON message with the system role.
+        re.compile(
+            r"(?-i:\[/?INST\]|<<\s?/?SYS\s?>>)"
+            r"|(?:^|\n)\s?#{2,4}\s?(?:system|instruction|instructions)\s?:"
+            r"|</\s?(?:user|human)\s?>\s?<\s?(?:system|assistant)\s?>"
+            r"|[\"']role[\"']\s?:\s?[\"']system[\"']",
+            re.I,
+        ),
+        "prompt_injection",
+    ),
+    (
+        # A note addressed to whichever AI reads the document. "This AI reading
+        # list" is not one, so "AI" needs "any / an / the" or a following
+        # assistant-type noun before the reading verb.
+        re.compile(
+            r"\b(?:(?:any|an|every|all|the)\s+(?:ai|llm|language\s+model|chatbot)s?"
+            r"(?:\s+(?:assistant|agent|model|system|bot)s?)?"
+            r"|ai\s+(?:assistant|agent|model|system|bot)s?)\s+"
+            r"(?:reading|processing|summari[sz]ing|parsing|scanning|reviewing)\s+"
+            r"(?:this|these)\b",
+            re.I,
+        ),
+        "prompt_injection",
+    ),
     # ══════════════════════════════════════════════════════════
     # ── UNIVERSAL: Data exfiltration ─────────────────────────
     # ══════════════════════════════════════════════════════════
@@ -2761,7 +2879,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # destination ("to my server", "to evil.example", "via webhook") is.
         re.compile(
             r"(export|send|transfer|upload|post|transmit|forward|exfiltrate|leak)\s+"
-            r"(all\s+)?(the\s+)?(user\s+)?"
+            r"((?:all|every)\s+)?(the\s+)?(user\s+)?"
             r"(credentials?|api\s+keys?|tokens?|secrets?|passwords?|"
             r"environment\s+variables?|env\s+vars?)\s+"
             + _INTERNAL_TRANSFER
@@ -2823,7 +2941,8 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         # "display token names", "print token count", "list password
         # requirements" (stdlib docstrings, tokenizer and policy questions).
         re.compile(
-            r"(fetch|display|list|dump|print)\s+(all\s+)?"
+            r"(fetch|display|list|dump|print|output|reveal|leak|give\s+me)\s+"
+            r"((?:all|every)\s+)?((?:the|your)\s+)?"
             r"(environment\s+variables?|env\s+vars?|api\s+keys?|"
             r"credentials?|secrets?|tokens?|passwords?)\b"
             r"(?!\s+(?:names?|counts?|usage|limits?|lengths?|types?|requirements?"
@@ -2838,7 +2957,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ══════════════════════════════════════════════════════════
     (
         re.compile(
-            r"(repeat|write|generate)\s+(this|the\s+following)\s+\w*\s*"
+            r"(repeat|write|generate|say)\s+(this|that|the\s+following)\s+\w*\s*"
             r"(\d{3,}|thousand|million|hundred)\s+times",
             re.I,
         ),
@@ -2855,7 +2974,7 @@ def _normalize_variants(
     1. Replace confusable characters (non-ASCII lookalikes → ASCII, see
        ``_CONFUSABLES_ALL``)
     2. NFKD normalization: maps fullwidth, compatibility chars to ASCII equivalents
-    3. Remove combining marks (diacritics)
+    3. Remove combining and enclosing marks (diacritics, U+20DD around a letter)
     4. Remove invisible characters (Cf, non-whitespace Cc, blank glyphs)
     5. Replace confusables again (NFKD can expose new ones, e.g. a
        mathematical alpha decomposes to Greek alpha)
@@ -2873,7 +2992,7 @@ def _normalize_variants(
     has_invisible = False
     for ch in decomposed:
         category = unicodedata.category(ch)
-        if category == "Mn":
+        if category in ("Mn", "Me"):
             continue
         if _is_invisible(ch, category):
             has_invisible = True
@@ -3040,6 +3159,10 @@ _BACKSLASH_ESCAPE = re.compile(
 # ("69676e6f72...") or groups joined by one separator: "69 67 6e", xxd-style
 # "6967 6e6f", "69:67:6e", "0x69, 0x67, 0x6e". Separators are mandatory
 # between groups, so the regex cannot split a run two ways (linear).
+# \t, \n and \r between two letters, as JSON-encoded tool output writes them. Read
+# as one space, so decoding never changes the number of lines. Code usually has them
+# at the end of a string ("line\n"), and that must not cost a whole decoded view.
+_JSON_WS_ESCAPE = re.compile(r"(?<=[^\W\d_])(?:\\[tnr])+(?=[^\W\d_])")
 _HEX_RUN = re.compile(
     r"(?<![0-9A-Za-z])(?:0[xX])?[0-9a-fA-F]{2,}"
     r"(?:(?:, |[ :,.-])(?:0[xX])?[0-9a-fA-F]{2,})*(?![0-9A-Za-z])"
@@ -3103,8 +3226,6 @@ def _base64_bytes(blob: str) -> bytes | None:
         if not chunk:
             continue
         chunk = chunk.replace("-", "+").replace("_", "/")
-        if len(chunk) % 4 == 1:
-            return None
         try:
             raw += base64.b64decode(chunk + "=" * (-len(chunk) % 4), validate=True)
         except (binascii.Error, ValueError):
@@ -3189,6 +3310,7 @@ def _decode_view(text: str) -> str:
         out = _PLUS_JOINED.sub(lambda m: m.group(0).replace("+", " "), out)
     if "\\" in out:
         out = _BACKSLASH_ESCAPE.sub(_decode_backslash_match, out)
+        out = _JSON_WS_ESCAPE.sub(" ", out)
     out = _HEX_RUN.sub(_decode_hex_match, out)
     return _BASE64_RUN.sub(_decode_base64_match, out)
 
@@ -3267,8 +3389,9 @@ class InputSanitizer:
 
     Normalizes Unicode (confusables, NFKD, invisible-character removal),
     collapses whitespace, checks leetspeak, separator-stripped and
-    markdown-stripped variants, and accepts an optional context field for
-    indirect injection defense.
+    markdown-stripped variants, and scans an optional context field with the
+    same rules (they match the stock phrases, not instructions written for an
+    agent; see README "Limitations").
 
     Args:
         max_length: Maximum length, in code points, of ``prompt`` and of
@@ -3296,8 +3419,8 @@ class InputSanitizer:
 
         Args:
             prompt: The user's prompt text.
-            context: Optional context field (CRM data, invoice text, etc.).
-                     Checked for indirect injection attacks.
+            context: Optional context field (CRM data, invoice text, etc.),
+                     scanned with the same rules as the prompt.
 
         Returns:
             SanitizationResult with violations list. Input longer than
@@ -3341,9 +3464,11 @@ class InputSanitizer:
         8. "I"-as-"i" text — confusables whose prototype is "l" read as "i"
         9. Re-joined text — keywords split by spaces (ign ore, dis regard),
            and letters spaced one apart with wider gaps between words
-        10. Decoded text — tag characters, HTML markup and entities, URL
+        10. Word-spaced text — punctuation between words read as a space
+            (ignore-all, a | b, IgnoreAll, markdown links) — and "1" read as "l"
+        11. Decoded text — tag characters, HTML markup and entities, URL
             encoding, backslash escapes, hex and base64 blobs decoded (up to
-            two layers), each decoded view scanned again with steps 1-9
+            two layers), each decoded view scanned again with steps 1-10
         A field whose candidates exceed the scan-work budget is reported as
         ``input_too_complex`` instead of being scanned further.
         """
@@ -3411,6 +3536,20 @@ class InputSanitizer:
             else normalized
         )
 
+        # 10. Punctuation between words read as a space ("ignore-all-previous",
+        #     "| ignore | all |", "IgnoreAll", "[ignore](http://a)"), and "1" read
+        #     as "l" ("a11 previous", "revea1").
+        word_spaced = _space_word_punct(normalized)
+        one_as_l = _deleet(normalized, _LEET_MAP_ONE_L) if "1" in normalized else normalized
+
+        # 11. Homoglyph folding garbles Cyrillic and other native text, so the
+        #     two separator readings are also taken from the raw text when it
+        #     differs ("и.г.н.о.р.и.р.у.й", "игнорируй-все").
+        if original != normalized:
+            native_separated = (_strip_separators(original), _space_word_punct(original))
+        else:
+            native_separated = (normalized, normalized)
+
         # Check patterns against all versions (deduplicated)
         versions = [original]
         for v in (
@@ -3424,6 +3563,9 @@ class InputSanitizer:
             unmarked,
             *rejoined,
             gapped,
+            word_spaced,
+            one_as_l,
+            *native_separated,
         ):
             if v not in versions:
                 versions.append(v)
@@ -3442,7 +3584,7 @@ class InputSanitizer:
                 if category not in violations and pattern.search(version):
                     violations.append(category)
 
-        # 10. Encoded payloads: one decoded view per layer, never longer than
+        # 12. Encoded payloads: one decoded view per layer, never longer than
         #     its source, scanned with the same pipeline (only the windows
         #     around the lines decoding changed, see _changed_windows).
         if depth < _MAX_DECODE_DEPTH:
