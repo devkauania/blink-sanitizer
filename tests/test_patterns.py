@@ -3,7 +3,13 @@
 A mutation run deleted 160 of the then 266 patterns at once with the suite still
 green, because test strings fired only a few of them. These tests fail when any
 single pattern disappears, changes category, loses a branch, or arrives without
-a test of its own.
+a test of its own. Tightening a bounded repeat by one ({1,2} to {1}, or {0,10}
+to {1,10}) fails them too where a verdict can change: of the 250 such mutants,
+234 fail the generated corpus (scripts/bound_mutants.py) and two more fail the
+window test below. The other 14 cannot change a verdict: 10 remove a count of 0
+that a word boundary already rules out, 3 lose only strings that another pattern
+of the same category, or a shorter alternative, still flags, and 1 shortens a
+repeat at the unanchored start of a pattern.
 """
 from __future__ import annotations
 
@@ -115,6 +121,23 @@ def test_every_generated_branch_string_still_reports_its_category(
         if category not in sanitizer.check(text).violations
     ]
     assert not lost, f"{len(lost)} of {len(flagged)} no longer flagged, first: {lost[:15]}"
+
+
+@pytest.mark.parametrize("head", ["Use developer mode", "Enable debug mode"])
+def test_device_exception_reads_exactly_120_characters_ahead(
+    sanitizer: InputSanitizer, head: str
+) -> None:
+    """The device exception ("developer mode on my android phone") is cancelled by a
+    jailbreak word up to 120 characters on. Both lookaheads start at the same place,
+    so the corpus generator cannot write this window at its limit; these strings do,
+    and fail when the window shrinks or grows by one."""
+    lead = " on my android phone "
+
+    def at(distance: int) -> str:
+        return head + lead + "x" * (distance - len(lead) - 1) + " without limits"
+
+    assert "jailbreak" in sanitizer.check(at(120)).violations
+    assert sanitizer.check(at(121)).allowed
 
 
 def test_every_generated_exception_stays_allowed(sanitizer: InputSanitizer) -> None:

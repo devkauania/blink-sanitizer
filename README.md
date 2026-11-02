@@ -152,10 +152,11 @@ Portuguese has 19 and 11/15.
   the 272 patterns and works out, at run time, that the sentence is caught by that
   pattern alone within its category. A pattern with no such sentence fails the
   suite, and so does deleting a pattern or changing its category.
-- **Each alternation branch.** `tests/pattern_corpus.json` is a committed snapshot of
-  5,035 strings generated from the parsed patterns, one per branch, 451 of them
-  exceptions that must stay allowed. It detects a word removed from a list. These
-  strings are not natural text.
+- **Each alternation branch and repeat bound.** `tests/pattern_corpus.json` is a
+  committed snapshot of 6,217 strings generated from the parsed patterns, one per
+  branch and one at each end of every bounded repeat (`{1,2}` written once and
+  twice), 534 of them exceptions that must stay allowed. It detects a word removed
+  from a list and a bound tightened by one. These strings are not natural text.
 - **Backtracking.** `tests/test_redos.py` rejects nested unbounded repeats and
   unbounded wildcards in the parsed regex, then pumps each pattern with near-misses
   of its own matches.
@@ -175,11 +176,17 @@ rather than a mutation tool, so these are samples and not a mutation score:
 | Normalization, decoding and decision logic | 241 of 243 |
 | Added catastrophic or over-broad rules, and removals of the 0.5.0 layers | 27 of 27 |
 | Remove one word from a list (all 456 in English patterns, 120 others) | 557 of 576 |
+| Tighten one bounded repeat by one, `{m,n}` to `{m,n-1}` or `{m+1,n}` (all 250) | 236 of 250 |
 
 The 2 survivors in the third row do not change a verdict: an empty `context`, and
 the `normalized` candidate (the list holds it twice). The 19 in the last row are
 mostly alternatives another pattern also covers ("enter god mode" is also caught by
-"god mode").
+"god mode"). Of the bounds, 234 are caught by the generated corpus
+(`python scripts/bound_mutants.py` lists the rest) and 2 by a hand-written window
+test; the 14 survivors cannot change a verdict: 10 drop a count of 0 that a word
+boundary already rules out, 3 lose only strings another pattern or a shorter
+alternative still flags, and 1 shortens a repeat at the unanchored start of a
+pattern.
 
 None of this measures detection of attacks nobody wrote a pattern for. Only the
 holdout above does.
@@ -496,6 +503,7 @@ python -m venv .venv && .venv/bin/python -m pip install -e . pytest
 .venv/bin/python scripts/stdlib_fp_scan.py
 .venv/bin/python scripts/budget_scan.py
 .venv/bin/python scripts/gen_pattern_corpus.py  # after changing a pattern on purpose
+.venv/bin/python scripts/bound_mutants.py       # which tightened bounds the corpus misses
 # regenerate the confusables table (Unicode data file, not vendored):
 curl -o confusables.txt https://www.unicode.org/Public/security/latest/confusables.txt
 .venv/bin/python scripts/gen_confusables.py confusables.txt
